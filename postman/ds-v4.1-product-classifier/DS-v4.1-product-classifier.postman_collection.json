@@ -1,0 +1,174 @@
+{
+  "info": {
+    "name": "DS v4.1 Product Classifier",
+    "description": "分類 prompt 在請求 Body 的 messages[0].content。改 prompt 只改這裡。\n\n接 API 之前先不要填 key。Environment「DS v4.1」的 api_key 留空；base_url 已是 https://api.deepseek.com 。model 在 Collection Variables，預設 deepseek-flash（DeepSeek V4.1-Flash）。reasoning_effort 預設 low，可改成 high 或 max。\n\n手動測一條：選 environment「DS v4.1」，把條款原文貼進 term_sheet，再 Send。送出前腳本會把 term_sheet 寫進 user message，條款裡的引號不會弄壞 JSON。\n\n批量測：Collection Runner 選同資料夾的 cases.json。列上的 term_sheet 是輸入；expected_product 有值才核對標籤，留空就只檢查格式。\n\nTests 檢查 product 是否在允許標籤內、matched_features 是否為字串陣列，以及 JSON 是否只有這兩個欄位。Visualize 分頁會顯示標籤和依據條款。",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "model",
+      "value": "deepseek-flash"
+    },
+    {
+      "key": "reasoning_effort",
+      "value": "low"
+    }
+  ],
+  "item": [
+    {
+      "name": "Classify product",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{api_key}}",
+              "type": "string"
+            }
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"model\": \"{{model}}\",\n  \"reasoning_effort\": \"{{reasoning_effort}}\",\n  \"response_format\": {\n    \"type\": \"json_object\"\n  },\n  \"stream\": false,\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You classify one structured product from a term sheet or confirmation. Read only the economic clauses: who buys or sells, the underlying, issue price, principal protection, coupon formula, cap, floor, barriers, knock-out schedule, direction, and maturity settlement. Ignore the marketing title if it conflicts with those clauses.\\nReturn JSON only:\\n{\\\"product\\\":\\\"<one label>\\\",\\\"matched_features\\\":[\\\"<the clauses that decided the label>\\\"]}\\nAllowed labels: AQ, DQ, CFF, Sharkfin, ELN, Step-down FCN, FCN, Step-down SCN, Phoenix, WRA, BEN, DCN, outside.\\nApply the first matching rule and stop.\\n1. AQ — Equity-linked Accumulator.\\nOTC derivative, not a note. The investor buys a specified amount of the underlying stock at the strike on a series of predetermined dates before the contract terminates. Early knock-out stops later purchases. A larger purchase when the close is below the strike is still AQ. One share delivery at a note's maturity is not AQ.\\n2. DQ — Equity-linked Decumulator.\\nSame contract shape as AQ, except the investor sells the specified amount of stock at the strike on those dates. Early knock-out stops later sales.\\n3. CFF — Cap Floor Floater.\\nThe investor receives enhanced periodic coupons linked to an interest rate. The Floor Rate secures a higher minimum coupon. Any upside beyond the Cap Rate is given up. Held to maturity, the note usually returns 100% of principal. This is the principal-protected rate product. An equity knock-out level is not a Cap Rate, and a coupon barrier on a stock is not a Floor Rate.\\n4. Sharkfin — SharkFin.\\nPrincipal is generally protected, so a poor underlying performance still returns the initial investment. The return increases when the underlying moves in the anticipated direction, up to a predefined cap or price ceiling. The direction is bullish, bearish, or twin-win, and twin-win means both sides can benefit the investor. Some SharkFin products also knock out: if the underlying reaches a barrier, the product settles early and the return can be capped. A knock-out is not required. Bullish, bearish, and twin-win all use the label Sharkfin. A reverse-convertible autocall is not a Sharkfin, because that note can settle below par.\\n5. Reverse-convertible gate.\\nIf the contract is not AQ, DQ, CFF, or Sharkfin, continue only when the instrument is a note that is not principal protected and a downside condition can settle it in shares or in cash worth less than par. Otherwise the label is outside.\\n6. ELN.\\nAll of the following: reverse convertible; issued at a discount; the yield is per annum; no coupon is paid during the life; the investor receives 100% of notional if the stock closes at or above the strike on the final observation date. A note issued at 100% with coupons during the life is not an ELN, even if the title says Equity Linked Note.\\n7. Per-annum coupon family.\\nThe coupon is paid during the life at an annualized rate, or each period pays a fraction of a yearly rate. All five names below are reverse convertibles.\\n- WRA: the coupon accrues each day only if the worst-performing underlying, the laggard, is at or above its own coupon accrual barrier that day.\\n- Step-down FCN: each scheduled coupon is unconditional, with no coupon-barrier test, and the autocall or knock-out level declines across successive observation dates.\\n- FCN: each scheduled coupon is unconditional, and the knock-out level does not decline. A knock-in barrier or strike below the initial price is not a step-down.\\n- Step-down SCN: the coupon is paid only when the note knocks out. Use this name whenever the coupon is knock-out only.\\n- Phoenix: a coupon date pays only if the underlying is at or above a coupon barrier. Use Phoenix whether a missed coupon is paid later or forfeited. Remembering that an underlying has hit an autocall trigger is an autocall memory, not a Phoenix memory coupon.\\n8. Flat payoff family.\\nThe coupon or bonus is one fixed amount, not per annum, typically at maturity. Both names are reverse convertibles.\\n- BEN: at maturity the investor receives the higher of a Bonus Coupon and the positive performance of the worst-performing underlying in the basket.\\n- DCN: at maturity a fixed coupon amount is paid if the coupon condition is fulfilled, and the payoff is not that higher-of comparison.\\n9. If none of the labels fit, return outside.\\n\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Replaced at send time by the term_sheet environment variable, or by the term_sheet column when you use Collection Runner.\"\n    }\n  ]\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": "{{base_url}}/chat/completions",
+        "description": "System message is the classifier prompt. User message is replaced from term_sheet when the request is sent."
+      },
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const payload = JSON.parse(pm.request.body.raw);",
+              "payload.model = pm.collectionVariables.get(\"model\") || payload.model;",
+              "payload.reasoning_effort = pm.collectionVariables.get(\"reasoning_effort\") || payload.reasoning_effort;",
+              "",
+              "function readTermSheet() {",
+              "    const fromRun = pm.iterationData.get(\"term_sheet\");",
+              "    if (fromRun !== undefined && fromRun !== null && String(fromRun).trim() !== \"\") {",
+              "        return String(fromRun);",
+              "    }",
+              "    const fromEnv = pm.environment.get(\"term_sheet\");",
+              "    if (fromEnv !== undefined && fromEnv !== null && String(fromEnv).trim() !== \"\") {",
+              "        return String(fromEnv);",
+              "    }",
+              "    return \"\";",
+              "}",
+              "",
+              "const termSheet = readTermSheet();",
+              "if (!termSheet) {",
+              "    throw new Error(\"Paste the term sheet into environment variable term_sheet, or add a term_sheet column in the Collection Runner data file.\");",
+              "}",
+              "payload.messages[1].content = termSheet;",
+              "pm.request.body.update(JSON.stringify(payload));"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "function extractJson(text) {",
+              "    const trimmed = String(text).trim();",
+              "    try {",
+              "        return JSON.parse(trimmed);",
+              "    } catch (error) {",
+              "        // fall through to fenced or sliced JSON",
+              "    }",
+              "    const fenced = trimmed.match(/```(?:json)?\\s*([\\s\\S]*?)```/);",
+              "    if (fenced) {",
+              "        return JSON.parse(fenced[1]);",
+              "    }",
+              "    const start = trimmed.indexOf(\"{\");",
+              "    const end = trimmed.lastIndexOf(\"}\");",
+              "    if (start >= 0 && end > start) {",
+              "        return JSON.parse(trimmed.slice(start, end + 1));",
+              "    }",
+              "    throw new Error(\"Assistant content does not contain a JSON object\");",
+              "}",
+              "",
+              "const allowed = [",
+              "    \"AQ\",",
+              "    \"DQ\",",
+              "    \"CFF\",",
+              "    \"Sharkfin\",",
+              "    \"ELN\",",
+              "    \"Step-down FCN\",",
+              "    \"FCN\",",
+              "    \"Step-down SCN\",",
+              "    \"Phoenix\",",
+              "    \"WRA\",",
+              "    \"BEN\",",
+              "    \"DCN\",",
+              "    \"outside\"",
+              "];",
+              "",
+              "let parsed;",
+              "",
+              "pm.test(\"HTTP 200\", function () {",
+              "    pm.response.to.have.status(200);",
+              "});",
+              "",
+              "pm.test(\"assistant content is a JSON object\", function () {",
+              "    const body = pm.response.json();",
+              "    const content = body.choices && body.choices[0] && body.choices[0].message && body.choices[0].message.content;",
+              "    pm.expect(content, \"choices[0].message.content\").to.be.a(\"string\").and.not.empty;",
+              "    parsed = extractJson(content);",
+              "    pm.expect(parsed).to.be.an(\"object\");",
+              "});",
+              "",
+              "if (parsed) {",
+              "    pm.test(\"product is an allowed label\", function () {",
+              "        pm.expect(allowed).to.include(parsed.product);",
+              "    });",
+              "",
+              "    pm.test(\"matched_features is an array of strings\", function () {",
+              "        pm.expect(parsed.matched_features).to.be.an(\"array\");",
+              "        parsed.matched_features.forEach(function (item) {",
+              "            pm.expect(item).to.be.a(\"string\").and.to.have.lengthOf.at.least(1);",
+              "        });",
+              "    });",
+              "",
+              "    pm.test(\"JSON has only product and matched_features\", function () {",
+              "        pm.expect(Object.keys(parsed).sort()).to.eql([\"matched_features\", \"product\"]);",
+              "    });",
+              "",
+              "    const expected = pm.iterationData.get(\"expected_product\");",
+              "    if (expected) {",
+              "        pm.test(\"product matches expected_product from the data file\", function () {",
+              "            pm.expect(parsed.product).to.eql(expected);",
+              "        });",
+              "    }",
+              "",
+              "    console.log(JSON.stringify(parsed, null, 2));",
+              "    pm.visualizer.set(",
+              "        \"<h1>{{product}}</h1><ul>{{#matched_features}}<li>{{.}}</li>{{/matched_features}}</ul>\",",
+              "        parsed",
+              "    );",
+              "}"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

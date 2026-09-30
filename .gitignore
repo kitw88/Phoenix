@@ -1,0 +1,9 @@
+data/
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+Sample TS/
+SD-FCN/
+FCN guaranteed period/
+*.pptx
