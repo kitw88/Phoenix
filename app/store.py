@@ -113,6 +113,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
         WHERE fingerprint IS NULL OR fingerprint = ''
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dismissed_targets (
+            fingerprint TEXT PRIMARY KEY
+        )
+        """
+    )
     case_columns = {row[1] for row in conn.execute("PRAGMA table_info(cases)")}
     if "source_name" not in case_columns:
         conn.execute("ALTER TABLE cases ADD COLUMN source_name TEXT NOT NULL DEFAULT ''")
@@ -122,6 +129,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE cases ADD COLUMN source_bytes BLOB")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_cases_workflow ON cases(workflow_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_case ON runs(case_id, kind, id)")
+    version_columns = {row[1] for row in conn.execute("PRAGMA table_info(prompt_versions)")}
+    if "remark" not in version_columns:
+        conn.execute("ALTER TABLE prompt_versions ADD COLUMN remark TEXT NOT NULL DEFAULT ''")
+    prompt_columns = {row[1] for row in conn.execute("PRAGMA table_info(prompts)")}
+    if "mismatch_review" not in prompt_columns:
+        conn.execute("ALTER TABLE prompts ADD COLUMN mismatch_review TEXT NOT NULL DEFAULT ''")
 
 
 def _seed(conn: sqlite3.Connection) -> None:
@@ -177,10 +190,15 @@ def _target_public(row: sqlite3.Row) -> dict:
 
 def snapshot() -> dict:
     with connect() as conn:
+        _hide_keyless_targets(conn)
         targets = [
             _target_public(row)
             for row in conn.execute(
-                "SELECT * FROM api_targets WHERE seen = 1 ORDER BY id"
+                """
+                SELECT * FROM api_targets
+                WHERE seen = 1
+                ORDER BY id
+                """
             )
         ]
         prompts = []
@@ -190,6 +208,7 @@ def snapshot() -> dict:
                     "id": row["id"],
                     "number": row["number"],
                     "body": row["body"],
+                    "remark": row["remark"] or "",
                     "created_at": row["created_at"],
                 }
                 for row in conn.execute(
@@ -229,6 +248,7 @@ def snapshot() -> dict:
                     "expectation_field": prompt["expectation_field"],
                     "expectation_options": json.loads(prompt["expectation_options"]),
                     "draft": prompt["draft"],
+                    "mismatch_review": prompt["mismatch_review"] or "",
                     "default_target_id": prompt["default_target_id"],
                     "versions": versions,
                     "workflow": None
@@ -312,27 +332,89 @@ def save_target_key(target_id: int, api_key: str) -> None:
             raise KeyError("target")
 
 
+def _hide_keyless_targets(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "UPDATE api_targets SET is_default = 0 WHERE trim(api_key) = ''"
+    )
+    seen_default = conn.execute(
+        """
+        SELECT id FROM api_targets
+        WHERE seen = 1 AND trim(api_key) != '' AND is_default = 1
+        ORDER BY id LIMIT 1
+        """
+    ).fetchone()
+    if not seen_default:
+        first = conn.execute(
+            """
+            SELECT id FROM api_targets
+            WHERE seen = 1 AND trim(api_key) != ''
+            ORDER BY id LIMIT 1
+            """
+        ).fetchone()
+        if first:
+            conn.execute("UPDATE api_targets SET is_default = 0")
+            conn.execute(
+                "UPDATE api_targets SET is_default = 1 WHERE id = ?",
+                (first["id"],),
+            )
+    conn.execute(
+        """
+        UPDATE prompts
+        SET default_target_id = (
+            SELECT id FROM api_targets
+            WHERE seen = 1 AND trim(api_key) != '' AND is_default = 1
+            ORDER BY id LIMIT 1
+        )
+        WHERE default_target_id IS NULL
+           OR default_target_id NOT IN (
+                SELECT id FROM api_targets WHERE seen = 1 AND trim(api_key) != ''
+           )
+        """
+    )
+    conn.execute(
+        """
+        UPDATE workflow_steps
+        SET pinned_target_id = (
+            SELECT id FROM api_targets
+            WHERE seen = 1 AND trim(api_key) != '' AND is_default = 1
+            ORDER BY id LIMIT 1
+        )
+        WHERE pinned_target_id IS NOT NULL
+          AND pinned_target_id NOT IN (
+                SELECT id FROM api_targets WHERE seen = 1 AND trim(api_key) != ''
+          )
+        """
+    )
 def apply_postman_targets(found: list[dict]) -> int:
     with connect() as conn:
         conn.execute("UPDATE api_targets SET seen = 0")
+        dismissed = {
+            row[0]
+            for row in conn.execute("SELECT fingerprint FROM dismissed_targets")
+        }
         for item in found:
             base_url = item["base_url"].rstrip("/")
             model = item["model"].strip()
             fingerprint = f"{base_url}\n{model}"
+            if fingerprint in dismissed:
+                continue
             host = base_url.split("//", 1)[-1].split("/")[0]
             name = f"{host} · {model}"
             current = conn.execute(
-                "SELECT id FROM api_targets WHERE fingerprint = ?",
+                "SELECT id, name, base_url, model FROM api_targets WHERE fingerprint = ?",
                 (fingerprint,),
             ).fetchone()
             if current:
+                old_host = current["base_url"].rstrip("/").split("//", 1)[-1].split("/")[0]
+                old_auto = f"{old_host} · {current['model']}"
+                kept_name = current["name"] if current["name"] != old_auto else name
                 conn.execute(
                     """
                     UPDATE api_targets
                     SET name = ?, base_url = ?, model = ?, seen = 1
                     WHERE id = ?
                     """,
-                    (name, base_url, model, current["id"]),
+                    (kept_name, base_url, model, current["id"]),
                 )
             else:
                 conn.execute(
@@ -343,39 +425,7 @@ def apply_postman_targets(found: list[dict]) -> int:
                     """,
                     (name, base_url, model, fingerprint),
                 )
-        seen_default = conn.execute(
-            "SELECT id FROM api_targets WHERE seen = 1 AND is_default = 1 ORDER BY id LIMIT 1"
-        ).fetchone()
-        if not seen_default:
-            first = conn.execute(
-                "SELECT id FROM api_targets WHERE seen = 1 ORDER BY id LIMIT 1"
-            ).fetchone()
-            if first:
-                conn.execute("UPDATE api_targets SET is_default = 0")
-                conn.execute(
-                    "UPDATE api_targets SET is_default = 1 WHERE id = ?",
-                    (first["id"],),
-                )
-        conn.execute(
-            """
-            UPDATE prompts
-            SET default_target_id = (
-                SELECT id FROM api_targets WHERE seen = 1 AND is_default = 1 ORDER BY id LIMIT 1
-            )
-            WHERE default_target_id IS NULL
-               OR default_target_id NOT IN (SELECT id FROM api_targets WHERE seen = 1)
-            """
-        )
-        conn.execute(
-            """
-            UPDATE workflow_steps
-            SET pinned_target_id = (
-                SELECT id FROM api_targets WHERE seen = 1 AND is_default = 1 ORDER BY id LIMIT 1
-            )
-            WHERE pinned_target_id IS NOT NULL
-              AND pinned_target_id NOT IN (SELECT id FROM api_targets WHERE seen = 1)
-            """
-        )
+        _hide_keyless_targets(conn)
         count = conn.execute(
             "SELECT COUNT(*) FROM api_targets WHERE seen = 1"
         ).fetchone()[0]
@@ -390,23 +440,53 @@ def update_target(target_id: int, fields: dict) -> None:
         if not current:
             raise KeyError("target")
         api_key = current["api_key"]
-        if fields.get("api_key"):
-            api_key = fields["api_key"].strip()
+        if fields.get("api_key") and str(fields["api_key"]).strip():
+            api_key = str(fields["api_key"]).strip()
+        name = str(fields.get("name") or current["name"]).strip() or current["name"]
+        base_url = str(fields.get("base_url") or current["base_url"]).strip().rstrip("/")
+        model = str(fields.get("model") or current["model"]).strip() or current["model"]
         conn.execute(
             """
             UPDATE api_targets
-            SET name = ?, base_url = ?, model = ?, api_key = ?, reasoning_effort = ?
+            SET name = ?, base_url = ?, model = ?, api_key = ?,
+                reasoning_effort = ?, fingerprint = ?
             WHERE id = ?
             """,
             (
-                fields.get("name", current["name"]).strip(),
-                fields.get("base_url", current["base_url"]).strip(),
-                fields.get("model", current["model"]).strip(),
+                name,
+                base_url,
+                model,
                 api_key,
                 fields.get("reasoning_effort", current["reasoning_effort"]),
+                f"{base_url}\n{model}",
                 target_id,
             ),
         )
+
+
+def delete_target(target_id: int) -> None:
+    with connect() as conn:
+        current = conn.execute(
+            "SELECT id, fingerprint, base_url, model FROM api_targets WHERE id = ?",
+            (target_id,),
+        ).fetchone()
+        if not current:
+            raise KeyError("target")
+        fingerprint = current["fingerprint"] or f"{current['base_url'].rstrip('/')}\n{current['model']}"
+        conn.execute(
+            "INSERT OR IGNORE INTO dismissed_targets (fingerprint) VALUES (?)",
+            (fingerprint,),
+        )
+        conn.execute(
+            "UPDATE prompts SET default_target_id = NULL WHERE default_target_id = ?",
+            (target_id,),
+        )
+        conn.execute(
+            "UPDATE workflow_steps SET pinned_target_id = NULL WHERE pinned_target_id = ?",
+            (target_id,),
+        )
+        conn.execute("DELETE FROM api_targets WHERE id = ?", (target_id,))
+        _hide_keyless_targets(conn)
 
 
 def set_default_target(prompt_id: int, target_id: int) -> None:
@@ -419,6 +499,23 @@ def set_default_target(prompt_id: int, target_id: int) -> None:
             "UPDATE prompts SET default_target_id = ? WHERE id = ?",
             (target_id, prompt_id),
         )
+
+
+def find_case_id_by_title(workflow_id: int, title: str) -> int | None:
+    cleaned = title.strip()
+    if not cleaned:
+        return None
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT id FROM cases
+            WHERE workflow_id = ? AND title = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (workflow_id, cleaned),
+        ).fetchone()
+    return int(row["id"]) if row else None
 
 
 def save_case(
@@ -509,7 +606,7 @@ def case_page(
     page_size = min(max(page_size, 1), 100)
     labeled = "c.expectation IS NOT NULL AND trim(c.expectation) != ''"
     suite_sql = labeled if suite == "test" else f"NOT ({labeled})"
-    run_filter = "AND r2.kind = 'regression'" if suite == "test" else ""
+    run_filter = ""
     version_filter = ""
     version_params: list = []
     if suite == "test" and version_id is not None:
@@ -561,7 +658,7 @@ def case_page(
             FROM (
                 SELECT (
                     SELECT r.passed FROM runs r
-                    WHERE r.case_id = c.id AND r.kind = 'regression' {score_version}
+                    WHERE r.case_id = c.id {score_version}
                     ORDER BY r.id DESC LIMIT 1
                 ) AS passed
                 FROM cases c
@@ -643,7 +740,57 @@ def delete_case(case_id: int) -> None:
         conn.execute("DELETE FROM cases WHERE id = ?", (case_id,))
 
 
-def publish_version(prompt_id: int) -> dict:
+def cases_for_scope(prompt_id: int, version_id: int | None, scope: str) -> list[dict]:
+    if scope not in {"all", "fail", "unscored"}:
+        raise ValueError("scope must be all, fail, or unscored")
+    cases = labeled_cases(prompt_id)
+    if scope == "all":
+        return cases
+    with connect() as conn:
+        step = conn.execute(
+            "SELECT workflow_id FROM workflow_steps WHERE prompt_id = ? AND position = 1",
+            (prompt_id,),
+        ).fetchone()
+        if not step:
+            return []
+        version_sql = ""
+        params: list = []
+        if version_id is not None:
+            version_sql = "AND r.prompt_version_id = ?"
+            params.append(version_id)
+        params.append(step["workflow_id"])
+        rows = conn.execute(
+            f"""
+            SELECT c.id, (
+                SELECT r.passed FROM runs r
+                WHERE r.case_id = c.id {version_sql}
+                ORDER BY r.id DESC
+                LIMIT 1
+            ) AS passed
+            FROM cases c
+            WHERE c.workflow_id = ?
+              AND c.expectation IS NOT NULL AND trim(c.expectation) != ''
+            """,
+            params,
+        ).fetchall()
+    if scope == "fail":
+        wanted = {row["id"] for row in rows if row["passed"] == 0}
+    else:
+        wanted = {row["id"] for row in rows if row["passed"] is None}
+    return [case for case in cases if case["id"] in wanted]
+
+
+def update_version_remark(version_id: int, remark: str) -> None:
+    with connect() as conn:
+        updated = conn.execute(
+            "UPDATE prompt_versions SET remark = ? WHERE id = ?",
+            (remark.strip(), version_id),
+        )
+        if updated.rowcount == 0:
+            raise KeyError("version")
+
+
+def publish_version(prompt_id: int, remark: str = "") -> dict:
     with connect() as conn:
         prompt = conn.execute("SELECT * FROM prompts WHERE id = ?", (prompt_id,)).fetchone()
         if not prompt:
@@ -658,10 +805,10 @@ def publish_version(prompt_id: int) -> dict:
         created_at = _now()
         conn.execute(
             """
-            INSERT INTO prompt_versions (prompt_id, number, body, created_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO prompt_versions (prompt_id, number, body, remark, created_at)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (prompt_id, number, body, created_at),
+            (prompt_id, number, body, remark.strip(), created_at),
         )
         version_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         step = conn.execute(
@@ -681,6 +828,7 @@ def publish_version(prompt_id: int) -> dict:
             "id": version_id,
             "number": number,
             "body": body,
+            "remark": remark.strip(),
             "created_at": created_at,
             "prompt_id": prompt_id,
         }
@@ -745,6 +893,32 @@ def get_version(version_id: int) -> dict | None:
             "SELECT * FROM prompt_versions WHERE id = ?", (version_id,)
         ).fetchone()
     return dict(row) if row else None
+
+
+def set_mismatch_review(prompt_id: int, text: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE prompts SET mismatch_review = ? WHERE id = ?",
+            (text, prompt_id),
+        )
+
+
+def get_runs_for_prompt(prompt_id: int, run_ids: list[int]) -> list[dict]:
+    if not run_ids:
+        return []
+    placeholders = ",".join("?" for _ in run_ids)
+    with connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM runs
+            WHERE prompt_id = ? AND id IN ({placeholders})
+            """,
+            [prompt_id, *run_ids],
+        ).fetchall()
+    order = {run_id: index for index, run_id in enumerate(run_ids)}
+    runs = [_run_public(row) for row in rows]
+    runs.sort(key=lambda item: order.get(item["id"], 0))
+    return runs
 
 
 def get_case(case_id: int) -> dict | None:

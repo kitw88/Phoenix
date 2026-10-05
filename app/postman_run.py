@@ -8,6 +8,7 @@ from app.postman_sync import PostmanSession, PostmanUnavailable, debugger_url
 REQUEST_MARK = "chat/completions"
 ENV_NAME = "Product Classifier"
 USER_KEY = "rawUser1Prompt"
+SYS_KEY = "rawSysPrompt"
 
 
 def split_chat_body(body: str) -> tuple[str, str]:
@@ -25,11 +26,13 @@ def split_chat_body(body: str) -> tuple[str, str]:
     return output, reasoning
 
 
-def _script(text: str) -> str:
-    payload = json.dumps(text)
+def _script(user_text: str, system_text: str) -> str:
+    user_payload = json.dumps(user_text)
+    system_payload = json.dumps(system_text)
     return f"""
 (async () => {{
-  const text = {payload};
+  const userText = {user_payload};
+  const systemText = {system_payload};
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
   function openDb(name) {{
@@ -67,15 +70,20 @@ def _script(text: str) -> str:
     return {{ ok: false, error: "Postman 裡沒有名為 Product Classifier 的 Environment。" }};
   }}
   const envId = (environment.value && environment.value.id) || environment.id;
+  function writeVar(list, key, value) {{
+    let wrote = false;
+    list.forEach((variable) => {{
+      if (variable && variable.key === key) {{
+        variable.value = value;
+        variable.enabled = true;
+        wrote = true;
+      }}
+    }});
+    if (!wrote) list.push({{ key, value, enabled: true, type: "default" }});
+  }}
   const values = (environment.value && environment.value.values) || [];
-  let wroteInitial = false;
-  values.forEach((variable) => {{
-    if (variable && variable.key === {json.dumps(USER_KEY)}) {{
-      variable.value = text;
-      wroteInitial = true;
-    }}
-  }});
-  if (!wroteInitial) values.push({{ key: {json.dumps(USER_KEY)}, value: text, enabled: true, type: "default" }});
+  writeVar(values, {json.dumps(USER_KEY)}, userText);
+  writeVar(values, {json.dumps(SYS_KEY)}, systemText);
   if (environment.value) environment.value.values = values;
   await putAll(envDb, "environments", [environment]);
   envDb.close();
@@ -85,15 +93,8 @@ def _script(text: str) -> str:
   const session = sessions.find((row) => row.model === "environment" && row.modelId === envId);
   if (session) {{
     const sessionValues = session.values || [];
-    let wroteSession = false;
-    sessionValues.forEach((variable) => {{
-      if (variable && variable.key === {json.dumps(USER_KEY)}) {{
-        variable.value = text;
-        variable.enabled = true;
-        wroteSession = true;
-      }}
-    }});
-    if (!wroteSession) sessionValues.push({{ key: {json.dumps(USER_KEY)}, value: text, enabled: true, type: "default" }});
+    writeVar(sessionValues, {json.dumps(USER_KEY)}, userText);
+    writeVar(sessionValues, {json.dumps(SYS_KEY)}, systemText);
     session.values = sessionValues;
     await putAll(appDb, "variable_sessions", [session]);
   }}
@@ -101,9 +102,11 @@ def _script(text: str) -> str:
   appDb.close();
   const beforeIds = before.map((row) => row.id);
 
-  const envOpen = [...document.querySelectorAll('td[data-column-id="key"]')]
-    .some((cell) => (cell.innerText || "").trim() === {json.dumps(USER_KEY)});
-  if (!envOpen) {{
+  function keyVisible(key) {{
+    return [...document.querySelectorAll('td[data-column-id="key"]')]
+      .some((cell) => (cell.innerText || "").trim() === key);
+  }}
+  if (!keyVisible({json.dumps(USER_KEY)}) || !keyVisible({json.dumps(SYS_KEY)})) {{
     const envRow = [...document.querySelectorAll('[data-testid="sidebar-panel-environment"] [data-testid="sidebar-row-name"]')]
       .find((el) => (el.innerText || "").trim() === {json.dumps(ENV_NAME)});
     if (envRow) {{
@@ -112,21 +115,72 @@ def _script(text: str) -> str:
     }}
   }}
 
-  const keyCell = [...document.querySelectorAll('td[data-column-id="key"]')]
-    .find((cell) => (cell.innerText || "").trim() === {json.dumps(USER_KEY)});
-  let live = false;
-  if (keyCell) {{
+  function pushLive(key, value) {{
+    const keyCell = [...document.querySelectorAll('td[data-column-id="key"]')]
+      .find((cell) => (cell.innerText || "").trim() === key);
+    if (!keyCell) return false;
     const editable = keyCell.parentElement.querySelector('td[data-column-id="sessionValue"] .editable-cell');
-    const fiberKey = editable && Object.keys(editable).find((key) => key.startsWith("__reactFiber"));
+    const fiberKey = editable && Object.keys(editable).find((keyName) => keyName.startsWith("__reactFiber"));
     let fiber = fiberKey ? editable[fiberKey] : null;
     for (let i = 0; i < 25 && fiber; i += 1) {{
       const props = fiber.memoizedProps || {{}};
       if (typeof props.customOnChange === "function") {{
-        props.customOnChange(text);
-        live = true;
-        break;
+        props.customOnChange(value);
+        return true;
       }}
       fiber = fiber.return;
+    }}
+    return false;
+  }}
+  const liveUser = pushLive({json.dumps(USER_KEY)}, userText);
+  const liveSystem = pushLive({json.dumps(SYS_KEY)}, systemText);
+  const live = liveUser && liveSystem;
+
+  const collectionName = (databases.find((db) => (db.name || "").endsWith("-v3-collections")) || {{}}).name;
+  if (collectionName) {{
+    const collectionDb = await openDb(collectionName);
+    let collections = [];
+    try {{
+      collections = await getAll(collectionDb, "v3-collections");
+    }} catch (err) {{
+      collections = [];
+    }}
+    collectionDb.close();
+    const seen = new WeakSet();
+    let sawRequest = false;
+    let usesSystemVar = false;
+    function walk(node) {{
+      if (!node || typeof node !== "object" || seen.has(node)) return;
+      seen.add(node);
+      if (Array.isArray(node)) {{
+        node.forEach(walk);
+        return;
+      }}
+      const url = node.url;
+      const body = node.body;
+      if (body && url) {{
+        const raw = typeof url === "string" ? url : (url.raw || "");
+        const content = typeof body.content === "string" ? body.content : "";
+        if (content && String(raw).includes("chat/completions")) {{
+          sawRequest = true;
+          const scriptText = JSON.stringify(node.scripts || []);
+          const direct = content.includes("{{{{rawSysPrompt}}}}");
+          const viaEscape = content.includes("{{{{escapedSysPrompt}}}}")
+            && scriptText.includes("rawSysPrompt")
+            && scriptText.includes("escapedSysPrompt");
+          if (direct || viaEscape) usesSystemVar = true;
+        }}
+      }}
+      Object.values(node).forEach(walk);
+    }}
+    collections.forEach(walk);
+    if (sawRequest && !usesSystemVar) {{
+      return {{
+        ok: false,
+        error: "請求 Body 的 system message 要寫成 {{{{rawSysPrompt}}}}，新版提示詞才會送出。",
+        beforeIds,
+        live,
+      }};
     }}
   }}
 
@@ -134,6 +188,13 @@ def _script(text: str) -> str:
     return [...document.querySelectorAll(selector)].find((el) => {{
       const rect = el.getBoundingClientRect();
       return rect.width > 0 && rect.height > 0;
+    }});
+  }}
+  function visibleSend() {{
+    return [...document.querySelectorAll("button")].find((el) => {{
+      const rect = el.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return false;
+      return (el.innerText || "").replace(/\\s+/g, " ").trim() === "Send";
     }});
   }}
   const requestRow = [...document.querySelectorAll('[data-testid="sidebar-row-name"]')]
@@ -158,7 +219,7 @@ def _script(text: str) -> str:
   if (!envSelected.includes({json.dumps(ENV_NAME)})) {{
     return {{ ok: false, error: "請先在 Postman 右上角把 Environment 選成 Product Classifier。", beforeIds, live }};
   }}
-  const send = visible('[data-testid="http-send-request-button"]');
+  const send = visibleSend();
   if (!send) return {{ ok: false, error: "畫面上沒有 Send。", beforeIds, live }};
   const rect = send.getBoundingClientRect();
   return {{
@@ -218,7 +279,136 @@ def _poll_script(before_ids: list[str]) -> str:
 """
 
 
-async def send_user_prompt(text: str) -> dict:
+def _health_script() -> str:
+    return """
+(async () => {
+  const envName = %s;
+  const requestMark = %s;
+  const sysKey = %s;
+  const issues = [];
+  function visible(selector) {
+    return [...document.querySelectorAll(selector)].find((el) => {
+      const rect = el.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    });
+  }
+  function visibleSend() {
+    return [...document.querySelectorAll("button")].find((el) => {
+      const rect = el.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return false;
+      return (el.innerText || "").replace(/\\s+/g, " ").trim() === "Send";
+    });
+  }
+  function openDb(name) {
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open(name);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(String(request.error));
+    });
+  }
+  function getAll(db, store) {
+    return new Promise((resolve, reject) => {
+      const request = db.transaction(store, "readonly").objectStore(store).getAll();
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(String(request.error));
+    });
+  }
+  const envTrigger = document.querySelector('[data-testid^="env-filter-select-trigger"]');
+  const envSelected = envTrigger ? (envTrigger.innerText || "").trim() : "";
+  if (!envSelected.includes(envName)) {
+    issues.push("請先在 Postman 右上角把 Environment 選成 " + envName + "。目前是：" + (envSelected || "未選擇"));
+  }
+  const requestRow = [...document.querySelectorAll('[data-testid="sidebar-row-name"]')].find((el) => {
+    const label = (el.innerText || "").trim();
+    return label.startsWith("https://") && label.includes(requestMark);
+  });
+  if (!requestRow) issues.push("側欄裡找不到要送出的 chat/completions 請求。");
+  const urlBar = visible('[data-testid="http-request-url-bar"]');
+  const urlText = urlBar ? (urlBar.innerText || "") : "";
+  if (!urlText.includes(requestMark)) issues.push("目前畫面不是 chat/completions 請求。");
+  if (!visibleSend()) issues.push("畫面上沒有 Send。");
+  try {
+    const databases = await indexedDB.databases();
+    const envDbName = (databases.find((db) => (db.name || "").endsWith("-environments")) || {}).name;
+    if (!envDbName) {
+      issues.push("Postman 裡沒有 Environment。");
+    } else {
+      const envDb = await openDb(envDbName);
+      const environments = await getAll(envDb, "environments");
+      envDb.close();
+      const environment = environments.find((row) => ((row.value && row.value.name) || row.name) === envName);
+      const values = environment ? ((environment.value && environment.value.values) || []) : [];
+      if (!environment) issues.push("Postman 裡沒有名為 " + envName + " 的 Environment。");
+      else if (!values.some((variable) => variable && variable.key === sysKey)) {
+        issues.push("Environment 裡沒有 " + sysKey + "。");
+      }
+    }
+    const collectionName = (databases.find((db) => (db.name || "").endsWith("-v3-collections")) || {}).name;
+    if (collectionName) {
+      const collectionDb = await openDb(collectionName);
+      const collections = await getAll(collectionDb, "v3-collections");
+      collectionDb.close();
+      const seen = new WeakSet();
+      let sawRequest = false;
+      let usesSystemVar = false;
+      function walk(node) {
+        if (!node || typeof node !== "object" || seen.has(node)) return;
+        seen.add(node);
+        if (Array.isArray(node)) { node.forEach(walk); return; }
+        const url = node.url;
+        const body = node.body;
+        if (body && url) {
+          const raw = typeof url === "string" ? url : (url.raw || "");
+          const content = typeof body.content === "string" ? body.content : "";
+          if (content && String(raw).includes(requestMark)) {
+            sawRequest = true;
+            const scriptText = JSON.stringify(node.scripts || []);
+            const direct = content.includes("{{" + sysKey + "}}");
+            const viaEscape = content.includes("{{escapedSysPrompt}}")
+              && scriptText.includes(sysKey)
+              && scriptText.includes("escapedSysPrompt");
+            if (direct || viaEscape) usesSystemVar = true;
+          }
+        }
+        Object.values(node).forEach(walk);
+      }
+      collections.forEach(walk);
+      if (sawRequest && !usesSystemVar) {
+        issues.push("請求 Body 的 system message 要寫成 {{" + sysKey + "}}，新版提示詞才會送出。");
+      }
+    }
+  } catch (err) {
+    issues.push("讀 Postman 本機資料失敗：" + String(err));
+  }
+  return { ok: issues.length === 0, issues };
+})()
+""" % (json.dumps(ENV_NAME), json.dumps(REQUEST_MARK), json.dumps(SYS_KEY))
+
+
+def check_health() -> dict:
+    try:
+        url = debugger_url()
+    except PostmanUnavailable as exc:
+        return {"ok": False, "issues": [str(exc)]}
+    try:
+        async def run() -> dict:
+            async with websockets.connect(url, max_size=20_000_000, open_timeout=5) as socket:
+                page = PostmanSession(socket)
+                value = await page.evaluate(_health_script())
+                return value if isinstance(value, dict) else {}
+
+        value = asyncio.run(run())
+    except PostmanUnavailable as exc:
+        return {"ok": False, "issues": [str(exc)]}
+    except (OSError, asyncio.TimeoutError, websockets.WebSocketException) as exc:
+        return {"ok": False, "issues": [f"連到 Postman 後中斷了。{exc}"]}
+    issues = [str(item) for item in (value.get("issues") or []) if str(item).strip()]
+    return {"ok": not issues, "issues": issues}
+
+
+async def send_user_prompt(user_text: str, system_text: str) -> dict:
+    if not system_text.strip():
+        raise PostmanUnavailable("這次沒有系統提示詞，所以沒有送出。")
     try:
         url = debugger_url()
     except PostmanUnavailable:
@@ -226,7 +416,7 @@ async def send_user_prompt(text: str) -> dict:
     try:
         async with websockets.connect(url, max_size=50_000_000, open_timeout=5) as socket:
             page = PostmanSession(socket)
-            started = await page.evaluate(_script(text))
+            started = await page.evaluate(_script(user_text, system_text))
             if not isinstance(started, dict) or not started.get("ok"):
                 message = (started or {}).get("error") if isinstance(started, dict) else "Postman 沒有送出請求。"
                 raise PostmanUnavailable(message or "Postman 沒有送出請求。")

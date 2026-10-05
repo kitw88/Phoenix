@@ -1,18 +1,27 @@
+import asyncio
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from app.extract import extract_text
 
-from app import postman_sync, runner, store
+from app import cursor_review, postman_run, postman_sync, runner, store
 
 WEB = Path(__file__).resolve().parents[1] / "web"
 
 app = FastAPI(title="Phoenix prompt desk")
 app.mount("/assets", StaticFiles(directory=WEB), name="assets")
+
+
+@app.middleware("http")
+async def revalidate_pages(request, call_next):
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/assets/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
 
 
 @app.on_event("startup")
@@ -21,13 +30,23 @@ def startup() -> None:
 
 
 @app.get("/")
-def index() -> FileResponse:
-    return FileResponse(WEB / "index.html")
+def index() -> Response:
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    css = int((WEB / "styles.css").stat().st_mtime)
+    script = int((WEB / "app.js").stat().st_mtime)
+    html = html.replace('href="/assets/styles.css?v=3"', f'href="/assets/styles.css?v={css}"')
+    html = html.replace('src="/assets/app.js?v=3"', f'src="/assets/app.js?v={script}"')
+    return Response(html, media_type="text/html", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/api/state")
 def state() -> dict:
     return store.snapshot()
+
+
+@app.get("/api/health")
+def health() -> dict:
+    return postman_run.check_health()
 
 
 class DraftBody(BaseModel):
@@ -52,7 +71,7 @@ def sync_postman() -> dict:
         return {"message": str(exc), "synced": False, "state": store.snapshot()}
     count = store.apply_postman_targets(found)
     return {
-        "message": f"從 Postman 識別到 {count} 個 API Target。secret 讀不到，key 存在評測系統裡。",
+        "message": f"從 Postman 識別到 {count} 個 API Target。key 存在評測系統裡。" if count else "沒有已留下 key 的 API Target。",
         "synced": True,
         "state": store.snapshot(),
     }
@@ -62,6 +81,30 @@ def sync_postman() -> dict:
 def save_target_key(target_id: int, body: KeyBody) -> dict:
     try:
         store.save_target_key(target_id, body.api_key)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="API Target not found")
+    return store.snapshot()
+
+
+class TargetEditBody(BaseModel):
+    name: str = ""
+    base_url: str = ""
+    api_key: str = ""
+
+
+@app.put("/api/targets/{target_id}")
+def edit_target(target_id: int, body: TargetEditBody) -> dict:
+    try:
+        store.update_target(target_id, body.model_dump())
+    except KeyError:
+        raise HTTPException(status_code=404, detail="API Target not found")
+    return store.snapshot()
+
+
+@app.delete("/api/targets/{target_id}")
+def remove_target(target_id: int) -> dict:
+    try:
+        store.delete_target(target_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="API Target not found")
     return store.snapshot()
@@ -172,13 +215,37 @@ def pin(prompt_id: int, body: PinBody) -> dict:
     return store.snapshot()
 
 
+class PublishBody(BaseModel):
+    remark: str = ""
+
+
+class RemarkBody(BaseModel):
+    remark: str = ""
+
+
+class RunBody(BaseModel):
+    source: str
+    version_id: int | None = None
+    target_id: int | None = None
+    scope: str
+
+
+@app.put("/api/versions/{version_id}/remark")
+def save_version_remark(version_id: int, body: RemarkBody) -> dict:
+    try:
+        store.update_version_remark(version_id, body.remark)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Prompt Version not found")
+    return store.snapshot()
+
+
 @app.post("/api/prompts/{prompt_id}/publish")
-async def publish(prompt_id: int) -> dict:
+async def publish(prompt_id: int, body: PublishBody | None = None) -> dict:
     prompt = store.get_prompt(prompt_id)
     if not prompt:
         raise HTTPException(status_code=404, detail="Prompt not found")
     try:
-        version = store.publish_version(prompt_id)
+        version = store.publish_version(prompt_id, body.remark if body else "")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     target_id = prompt["default_target_id"]
@@ -196,7 +263,131 @@ async def publish(prompt_id: int) -> dict:
                 kind="regression",
             )
         )
+    await _attach_review(prompt_id, runs)
     return {"version": version, "runs": runs, "state": store.snapshot()}
+
+
+def _run_brief(run: dict) -> dict:
+    return {
+        "id": run["id"],
+        "case_id": run["case_id"],
+        "passed": run["passed"],
+        "error": run.get("error") or "",
+    }
+
+
+@app.post("/api/prompts/{prompt_id}/run")
+async def run_labeled(prompt_id: int, body: RunBody) -> dict:
+    prompt = store.get_prompt(prompt_id)
+    if not prompt:
+        raise HTTPException(status_code=404, detail="Prompt not found")
+    if body.scope not in {"all", "fail", "unscored"}:
+        raise HTTPException(status_code=400, detail="scope must be all, fail, or unscored")
+    version_id = None
+    if body.source == "version":
+        version = store.get_version(body.version_id or 0)
+        if not version or version["prompt_id"] != prompt_id:
+            raise HTTPException(status_code=404, detail="Prompt Version not found")
+        text = version["body"]
+        version_id = version["id"]
+    elif body.source == "draft":
+        text = prompt["draft"]
+    else:
+        raise HTTPException(status_code=400, detail="source must be draft or version")
+    target_id = body.target_id or prompt["default_target_id"]
+    if not target_id:
+        raise HTTPException(status_code=400, detail="先選 API Target")
+    try:
+        cases = store.cases_for_scope(prompt_id, version_id, body.scope)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not cases:
+        return {"runs": [], "message": "沒有要跑的 Case", "state": store.snapshot()}
+    runs = []
+    for case in cases:
+        run = await runner.execute_via_postman(
+            prompt_id=prompt_id,
+            body=text,
+            target_id=target_id,
+            input_text=case["input_text"],
+            case_id=case["id"],
+            version_id=version_id,
+            expectation=case["expectation"],
+            kind="regression",
+        )
+        runs.append(run)
+    await _attach_review(prompt_id, runs)
+    briefs = [_run_brief(run) for run in runs]
+    failed = sum(1 for run in briefs if run["passed"] is False)
+    label = {"all": "全部", "fail": "未通過", "unscored": "未回歸"}[body.scope]
+    return {
+        "runs": briefs,
+        "message": f"Run {label} 完成，{len(runs)} 筆，未通過 {failed} 筆",
+        "state": store.snapshot(),
+    }
+
+
+class ReviewBody(BaseModel):
+    run_ids: list[int]
+
+
+def _product(run: dict) -> str:
+    parsed = run.get("parsed")
+    if isinstance(parsed, dict) and parsed.get("product") is not None:
+        return str(parsed["product"])
+    return ""
+
+
+def _mismatches(runs: list[dict]) -> list[dict]:
+    found = []
+    for run in runs:
+        if run.get("passed") is not False:
+            continue
+        expectation = (run.get("expectation") or "").strip()
+        if not expectation:
+            continue
+        product = _product(run)
+        output = (run.get("output_text") or "").strip()
+        if not product and not output:
+            continue
+        if product == expectation:
+            continue
+        case = store.get_case(run.get("case_id") or 0) or {}
+        found.append(
+            {
+                "title": case.get("title") or f"Case {run.get('case_id')}",
+                "expectation": expectation,
+                "product": product,
+                "output": output,
+                "reasoning": run.get("reasoning_text") or "",
+                "input": run.get("input_text") or "",
+                "prompt": run.get("body") or "",
+            }
+        )
+    return found
+
+
+@app.post("/api/prompts/{prompt_id}/review")
+async def review_mismatches(prompt_id: int, body: ReviewBody) -> dict:
+    prompt = store.get_prompt(prompt_id)
+    if not prompt:
+        raise HTTPException(status_code=404, detail="Prompt not found")
+    runs = store.get_runs_for_prompt(prompt_id, body.run_ids)
+    cases = _mismatches(runs)
+    if cases:
+        prompt_text = cases[0]["prompt"] or prompt["draft"]
+        text = await asyncio.to_thread(cursor_review.analyze, prompt_text, cases)
+        store.set_mismatch_review(prompt_id, text)
+    return {"state": store.snapshot()}
+
+
+async def _attach_review(prompt_id: int, runs: list[dict]) -> None:
+    cases = _mismatches(runs)
+    if not cases:
+        return
+    prompt_text = cases[0]["prompt"] or ""
+    text = await asyncio.to_thread(cursor_review.analyze, prompt_text, cases)
+    store.set_mismatch_review(prompt_id, text)
 
 
 class TryBody(BaseModel):
@@ -231,17 +422,22 @@ async def try_run(prompt_id: int, body: TryBody) -> dict:
         expectation=case["expectation"] or None,
         kind="try",
     )
+    await _attach_review(prompt_id, [run])
     return {"run": run, "state": store.snapshot()}
 
 
 @app.post("/api/workflows/{workflow_id}/drop")
-async def drop_case(workflow_id: int, file: UploadFile = File(...)) -> dict:
+async def drop_case(
+    workflow_id: int,
+    file: UploadFile = File(...),
+    expectation: str = Form(""),
+) -> dict:
     raw = await file.read()
     try:
         text = extract_text(file.filename or "", raw)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    title = (file.filename or "Dropped case").rsplit(".", 1)[0]
+    title = (file.filename or "Dropped case").rsplit(".", 1)[0].strip() or "Dropped case"
     state = store.snapshot()
     prompt = next(
         (
@@ -253,12 +449,19 @@ async def drop_case(workflow_id: int, file: UploadFile = File(...)) -> dict:
     )
     if not prompt:
         raise HTTPException(status_code=404, detail="Workflow not found")
+    chosen = expectation.strip()
+    if chosen and chosen not in prompt["expectation_options"]:
+        raise HTTPException(status_code=400, detail="期望標籤不在清單裡")
+    existing_id = store.find_case_id_by_title(workflow_id, title)
+    existing = store.get_case(existing_id) if existing_id else None
+    kept = ((existing or {}).get("expectation") or "").strip()
+    applied = chosen or kept
     case_id = store.save_case(
         workflow_id,
-        None,
+        existing_id,
         title,
         text,
-        "",
+        chosen if chosen else (None if existing else ""),
         source_name=file.filename or "",
         source_mime=file.content_type or "application/octet-stream",
         source_bytes=raw,
@@ -270,7 +473,14 @@ async def drop_case(workflow_id: int, file: UploadFile = File(...)) -> dict:
         input_text=text,
         case_id=case_id,
         version_id=None,
-        expectation=None,
-        kind="try",
+        expectation=applied or None,
+        kind="regression" if applied else "try",
     )
-    return {"run": run, "case_id": case_id, "state": store.snapshot()}
+    await _attach_review(prompt["id"], [run])
+    return {
+        "run": run,
+        "case_id": case_id,
+        "replaced": existing is not None,
+        "expectation": applied,
+        "state": store.snapshot(),
+    }

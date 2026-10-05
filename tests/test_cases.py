@@ -76,9 +76,66 @@ def test_pdf_is_stored_and_failures_page_without_the_file(tmp_path, monkeypatch)
     assert row["id"] == missed
     assert row["product"] == "DCN"
     assert row["has_source"] is True
+    assert version["remark"] == ""
+    store.update_version_remark(version["id"], "只改 AQ 的定義")
+    saved = store.snapshot()["prompts"][0]["versions"][0]
+    assert saved["remark"] == "只改 AQ 的定義"
+    open_case = store.save_case(workflow_id, None, "open", "open text", "DCN")
+    fail_ids = [case["id"] for case in store.cases_for_scope(prompt["id"], version["id"], "fail")]
+    open_ids = [case["id"] for case in store.cases_for_scope(prompt["id"], version["id"], "unscored")]
+    assert fail_ids == [missed]
+    assert open_ids == [open_case]
     assert "source_bytes" not in row
     blob = json.dumps(page)
     assert "%PDF" not in blob
     assert store.get_case_file(kept)["bytes"] == b"%PDF-kept"
     detail = store.get_run(row["run_id"])
     assert "coupon" in detail["reasoning_text"]
+
+
+def test_same_filename_updates_the_existing_case(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "DB_PATH", tmp_path / "phoenix.sqlite")
+    store.init_db()
+    prompt = store.snapshot()["prompts"][0]
+    workflow_id = prompt["workflow"]["id"]
+    first = store.save_case(
+        workflow_id,
+        None,
+        "snowball",
+        "old text",
+        "Step-down SCN",
+        source_name="snowball.pdf",
+        source_mime="application/pdf",
+        source_bytes=b"old",
+    )
+    found = store.find_case_id_by_title(workflow_id, "snowball")
+    assert found == first
+    store.save_case(
+        workflow_id,
+        found,
+        "snowball",
+        "new text",
+        None,
+        source_name="snowball.pdf",
+        source_mime="application/pdf",
+        source_bytes=b"new",
+    )
+    other = store.save_case(workflow_id, None, "other", "other text", "")
+    case = store.get_case(first)
+    assert case["input_text"] == "new text"
+    assert case["expectation"] == "Step-down SCN"
+    assert store.get_case_file(first)["bytes"] == b"new"
+    assert store.get_case(other)["id"] == other
+    page = store.case_page(workflow_id, suite="test", result="all", page=1, page_size=50, version_id=None)
+    assert page["counts"]["labeled"] == 1
+    store.save_case(
+        workflow_id,
+        found,
+        "snowball",
+        "newer text",
+        "Phoenix",
+        source_name="snowball.pdf",
+        source_mime="application/pdf",
+        source_bytes=b"newer",
+    )
+    assert store.get_case(first)["expectation"] == "Phoenix"

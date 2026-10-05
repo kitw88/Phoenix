@@ -152,7 +152,7 @@ async def execute_via_postman(
             }
         )
     try:
-        result = await postman_run.send_user_prompt(input_text)
+        result = await postman_run.send_user_prompt(input_text, body)
     except PostmanUnavailable as exc:
         return store.insert_run(
             {
