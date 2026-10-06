@@ -1,19 +1,47 @@
 import asyncio
+import re
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, Response
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from app.extract import extract_text
 
-from app import cursor_review, postman_run, postman_sync, runner, store
+from app import cursor_review, mail, postman_sync, runner, store
 
 WEB = Path(__file__).resolve().parents[1] / "web"
+EMAIL_RE = re.compile(r"^[a-z0-9._+-]+@easyview\.com\.hk$")
+PUBLIC_API = {"/api/auth/otp", "/api/auth/verify", "/api/auth/me", "/api/auth/logout"}
 
-app = FastAPI(title="Phoenix prompt desk")
+app = FastAPI(title="Prompt Desk")
 app.mount("/assets", StaticFiles(directory=WEB), name="assets")
+
+
+def normalize_email(value: str) -> str:
+    email = (value or "").strip().lower()
+    if not EMAIL_RE.match(email):
+        raise ValueError("domain")
+    return email
+
+
+def _secure_cookie(request: Request) -> bool:
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    return proto == "https"
+
+
+@app.middleware("http")
+async def attach_user(request: Request, call_next):
+    user = store.user_from_token(request.cookies.get("phoenix_session"))
+    token = store.actor.set(user)
+    try:
+        path = request.url.path
+        if path.startswith("/api/") and path not in PUBLIC_API and not user:
+            return JSONResponse({"detail": "未登錄"}, status_code=401)
+        return await call_next(request)
+    finally:
+        store.actor.reset(token)
 
 
 @app.middleware("http")
@@ -45,8 +73,75 @@ def state() -> dict:
 
 
 @app.get("/api/health")
-def health() -> dict:
-    return postman_run.check_health()
+async def health(target_id: int | None = None) -> dict:
+    return await runner.check_target(target_id)
+
+
+class EmailBody(BaseModel):
+    email: str = ""
+    locale: str = ""
+
+
+class VerifyBody(BaseModel):
+    email: str = ""
+    code: str = ""
+
+
+@app.post("/api/auth/otp")
+def request_otp(body: EmailBody, request: Request) -> dict:
+    try:
+        email = normalize_email(body.email)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="只能使用 @easyview.com.hk 郵箱")
+    try:
+        code = store.issue_otp(email)
+    except RuntimeError:
+        raise HTTPException(status_code=429, detail="請稍後再要驗證碼")
+    locale = body.locale or request.headers.get("accept-language", "")
+    try:
+        mail.send_otp(email, code, locale)
+    except Exception:
+        raise HTTPException(status_code=502, detail="驗證碼沒有發出")
+    return {"ok": True}
+
+
+@app.post("/api/auth/verify")
+def verify_otp(body: VerifyBody, request: Request) -> JSONResponse:
+    try:
+        email = normalize_email(body.email)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="只能使用 @easyview.com.hk 郵箱")
+    user = store.consume_otp(email, body.code)
+    if not user:
+        raise HTTPException(status_code=400, detail="驗證碼不對或已過期")
+    token = store.create_session(user["id"])
+    response = JSONResponse(user)
+    response.set_cookie(
+        "phoenix_session",
+        token,
+        httponly=True,
+        samesite="lax",
+        secure=_secure_cookie(request),
+        max_age=60 * 60 * 24 * 14,
+        path="/",
+    )
+    return response
+
+
+@app.get("/api/auth/me")
+def me(request: Request) -> dict:
+    user = store.user_from_token(request.cookies.get("phoenix_session"))
+    if not user:
+        raise HTTPException(status_code=401, detail="未登錄")
+    return user
+
+
+@app.post("/api/auth/logout")
+def logout(request: Request) -> JSONResponse:
+    store.drop_session(request.cookies.get("phoenix_session"))
+    response = JSONResponse({"ok": True})
+    response.delete_cookie("phoenix_session", path="/")
+    return response
 
 
 class DraftBody(BaseModel):
@@ -56,6 +151,7 @@ class DraftBody(BaseModel):
 @app.put("/api/prompts/{prompt_id}/draft")
 def save_draft(prompt_id: int, body: DraftBody) -> dict:
     store.update_draft(prompt_id, body.draft)
+    store.add_activity("prompt_draft")
     return store.snapshot()
 
 
@@ -90,6 +186,23 @@ class TargetEditBody(BaseModel):
     name: str = ""
     base_url: str = ""
     api_key: str = ""
+
+
+class TargetCreateBody(BaseModel):
+    name: str = ""
+    base_url: str = ""
+    api_key: str = ""
+    model: str = ""
+
+
+@app.post("/api/targets")
+def add_target(body: TargetCreateBody) -> dict:
+    try:
+        target_id = store.create_target(body.name, body.base_url, body.api_key, body.model)
+    except ValueError as exc:
+        missing = {"base_url": "URL", "api_key": "key", "model": "model"}[str(exc)]
+        raise HTTPException(status_code=400, detail=f"需要填 {missing}")
+    return {"id": target_id, "state": store.snapshot()}
 
 
 @app.put("/api/targets/{target_id}")
@@ -134,6 +247,7 @@ def save_case(workflow_id: int, body: CaseBody) -> dict:
         store.save_case(workflow_id, body.case_id, body.title, body.input_text, body.expectation)
     except KeyError:
         raise HTTPException(status_code=404, detail="Case not found")
+    store.add_activity("case", (body.title or "").strip())
     return store.snapshot()
 
 
@@ -197,7 +311,9 @@ def read_run(run_id: int) -> dict:
 
 @app.delete("/api/cases/{case_id}")
 def delete_case(case_id: int) -> dict:
+    case = store.get_case(case_id)
     store.delete_case(case_id)
+    store.add_activity("delete", ((case or {}).get("title") or "").strip())
     return store.snapshot()
 
 
@@ -236,6 +352,7 @@ def save_version_remark(version_id: int, body: RemarkBody) -> dict:
         store.update_version_remark(version_id, body.remark)
     except KeyError:
         raise HTTPException(status_code=404, detail="Prompt Version not found")
+    store.add_activity("prompt_remark")
     return store.snapshot()
 
 
@@ -248,11 +365,12 @@ async def publish(prompt_id: int, body: PublishBody | None = None) -> dict:
         version = store.publish_version(prompt_id, body.remark if body else "")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    store.add_activity("prompt_publish", str(version["number"]))
     target_id = prompt["default_target_id"]
     runs = []
     for case in store.labeled_cases(prompt_id):
         runs.append(
-            await runner.execute_via_postman(
+            await runner.execute(
                 prompt_id=prompt_id,
                 body=version["body"],
                 target_id=target_id,
@@ -303,9 +421,10 @@ async def run_labeled(prompt_id: int, body: RunBody) -> dict:
         raise HTTPException(status_code=400, detail=str(exc))
     if not cases:
         return {"runs": [], "message": "沒有要跑的 Case", "state": store.snapshot()}
+    store.add_activity("run", body.scope)
     runs = []
     for case in cases:
-        run = await runner.execute_via_postman(
+        run = await runner.execute(
             prompt_id=prompt_id,
             body=text,
             target_id=target_id,
@@ -412,7 +531,7 @@ async def try_run(prompt_id: int, body: TryBody) -> dict:
         version_id = version["id"]
     else:
         text = prompt["draft"]
-    run = await runner.execute_via_postman(
+    run = await runner.execute(
         prompt_id=prompt_id,
         body=text,
         target_id=body.target_id,
@@ -466,7 +585,8 @@ async def drop_case(
         source_mime=file.content_type or "application/octet-stream",
         source_bytes=raw,
     )
-    run = await runner.execute_via_postman(
+    store.add_activity("upload", file.filename or title)
+    run = await runner.execute(
         prompt_id=prompt["id"],
         body=prompt["draft"],
         target_id=prompt["default_target_id"],

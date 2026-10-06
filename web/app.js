@@ -15,6 +15,7 @@ let versionQuery = "";
 let selectedTargetId = null;
 let targetMenuOpen = false;
 let targetEditorId = null;
+let addingTarget = false;
 let targetCloseTimer = 0;
 let targetOutsideBound = false;
 let renderedView = { mode: "draft", versionId: null };
@@ -22,6 +23,11 @@ let focusSearch = false;
 let versionScrollTop = 0;
 let lastUploadKey = "";
 let lastUploadAt = 0;
+let sessionUser = null;
+let loginEmail = "";
+let loginCode = "";
+let loginNotice = "";
+let loginError = "";
 let table = {
   suite: "test",
   result: "all",
@@ -33,7 +39,7 @@ let table = {
   openId: null,
   detail: null,
 };
-let lang = localStorage.getItem("phoenix-lang") || "hant";
+let lang = localStorage.getItem("phoenix-lang") || "en";
 if (!["hant", "hans", "en"].includes(lang)) lang = "hant";
 
 const COPY = {
@@ -48,6 +54,7 @@ const COPY = {
     addCase: "加入 Case",
     cancelEdit: "取消編輯",
     apiTarget: "API Target",
+    addTarget: "新增 API Target",
     resync: "重新識別 Postman",
     noKeyed: "沒有已留下 key 的 API Target。",
     searchVersions: "搜尋版本",
@@ -71,7 +78,10 @@ const COPY = {
     enterKey: "輸入 key",
     nickname: "暱稱",
     url: "URL",
+    modelId: "模型",
     saveTarget: "保存",
+    targetAdded: "已新增 API Target。",
+    targetNeed: "請填 URL、模型和 key。",
     deleteTarget: "刪除",
     noTarget: "沒有已連接的 API Target",
     targetSaved: "API Target 已保存",
@@ -81,12 +91,32 @@ const COPY = {
     resizePanes: "調整草稿與分析高度",
     reviewing: "正在把 reasoning 交給 Cursor 分析",
     working: "正在處理",
+    signIn: "登錄",
+    signOut: "登出",
+    loginEmail: "公司郵箱",
+    loginEmailPh: "name@easyview.com.hk",
+    sendOtp: "發送驗證碼",
+    otpCode: "驗證碼",
+    otpPh: "6 位驗證碼",
+    activity: "紀錄",
+    log_prompt_publish: "發布了 #{detail}",
+    log_prompt_draft: "保存了草稿",
+    log_prompt_remark: "改了版本備註",
+    log_upload: "上傳了 {detail}",
+    log_case: "更新了 {detail}",
+    log_delete: "刪除了 {detail}",
+    log_run: "跑了 {detail}",
     result: "結果",
     unselected: "未選擇",
     targetsFound: "從 Postman 識別到 {n} 個 API Target。key 存在評測系統裡。",
     ranBack: "已跑回 {product}。",
-    checking: "正在檢查 Postman",
+    checking: "正在檢查 API Target",
     linkOpen: "鏈路暢通。",
+    healthNone: "還沒有 API Target。",
+    healthNoKey: "{name} 還沒有 key。",
+    healthUnreachable: "連不到 {name}。",
+    healthRejected: "{name} 拒絕了這個 key。",
+    healthHttp: "{name} 回應 HTTP {status}。",
     healthDown: "評測系統的健康檢查沒有回應。",
     all: "全部",
     failCount: "未通過 {n}",
@@ -174,6 +204,7 @@ const COPY = {
     addCase: "加入 Case",
     cancelEdit: "取消编辑",
     apiTarget: "API Target",
+    addTarget: "新增 API Target",
     resync: "重新识别 Postman",
     noKeyed: "没有已留下 key 的 API Target。",
     searchVersions: "搜索版本",
@@ -197,7 +228,10 @@ const COPY = {
     enterKey: "输入 key",
     nickname: "昵称",
     url: "URL",
+    modelId: "模型",
     saveTarget: "保存",
+    targetAdded: "已新增 API Target。",
+    targetNeed: "请填 URL、模型和 key。",
     deleteTarget: "删除",
     noTarget: "没有已连接的 API Target",
     targetSaved: "API Target 已保存",
@@ -207,12 +241,32 @@ const COPY = {
     resizePanes: "调整草稿与分析高度",
     reviewing: "正在把 reasoning 交给 Cursor 分析",
     working: "正在处理",
+    signIn: "登录",
+    signOut: "登出",
+    loginEmail: "公司邮箱",
+    loginEmailPh: "name@easyview.com.hk",
+    sendOtp: "发送验证码",
+    otpCode: "验证码",
+    otpPh: "6 位验证码",
+    activity: "记录",
+    log_prompt_publish: "发布了 #{detail}",
+    log_prompt_draft: "保存了草稿",
+    log_prompt_remark: "改了版本备注",
+    log_upload: "上传了 {detail}",
+    log_case: "更新了 {detail}",
+    log_delete: "删除了 {detail}",
+    log_run: "跑了 {detail}",
     result: "结果",
     unselected: "未选择",
     targetsFound: "从 Postman 识别到 {n} 个 API Target。key 存在评测系统里。",
     ranBack: "已跑回 {product}。",
-    checking: "正在检查 Postman",
+    checking: "正在检查 API Target",
     linkOpen: "链路畅通。",
+    healthNone: "还没有 API Target。",
+    healthNoKey: "{name} 还没有 key。",
+    healthUnreachable: "连不到 {name}。",
+    healthRejected: "{name} 拒绝了这个 key。",
+    healthHttp: "{name} 回应 HTTP {status}。",
     healthDown: "评测系统的健康检查没有回应。",
     all: "全部",
     failCount: "未通过 {n}",
@@ -300,6 +354,7 @@ const COPY = {
     addCase: "Add case",
     cancelEdit: "Cancel edit",
     apiTarget: "API Target",
+    addTarget: "Add API Target",
     resync: "Identify Postman again",
     noKeyed: "No API target has a saved key.",
     searchVersions: "Search versions",
@@ -323,7 +378,10 @@ const COPY = {
     enterKey: "Enter key",
     nickname: "Nickname",
     url: "URL",
+    modelId: "Model",
     saveTarget: "Save",
+    targetAdded: "Added the API target.",
+    targetNeed: "Enter a URL, a model, and a key.",
     deleteTarget: "Delete",
     noTarget: "No connected API target",
     targetSaved: "API Target saved",
@@ -333,12 +391,32 @@ const COPY = {
     resizePanes: "Resize draft and analysis",
     reviewing: "Sending the reasoning to Cursor",
     working: "Working",
+    signIn: "Sign in",
+    signOut: "Sign out",
+    loginEmail: "Work email",
+    loginEmailPh: "name@easyview.com.hk",
+    sendOtp: "Send Code",
+    otpCode: "Code",
+    otpPh: "6-digit code",
+    activity: "Activity",
+    log_prompt_publish: "Published #{detail}",
+    log_prompt_draft: "Saved the draft",
+    log_prompt_remark: "Edited the version note",
+    log_upload: "Uploaded {detail}",
+    log_case: "Updated {detail}",
+    log_delete: "Deleted {detail}",
+    log_run: "Ran {detail}",
     result: "Result",
     unselected: "Not selected",
     targetsFound: "Identified {n} API target(s) from Postman. The key is stored in the desk.",
     ranBack: "Ran {product}. ",
-    checking: "Checking Postman",
+    checking: "Checking the API target",
     linkOpen: "Link is open. ",
+    healthNone: "No API target yet.",
+    healthNoKey: "{name} has no key.",
+    healthUnreachable: "{name} did not respond.",
+    healthRejected: "{name} rejected the key.",
+    healthHttp: "{name} returned HTTP {status}.",
     healthDown: "The desk health check did not respond.",
     all: "All",
     failCount: "Fail {n}",
@@ -348,9 +426,9 @@ const COPY = {
     suitePending: "To confirm {n}",
     pageSummary: "{n} cases, 50 per page.",
     colName: "File name",
-    colExpect: "Expected",
+    colExpect: "Expectation",
     colModel: "Model",
-    colScore: "Regress",
+    colScore: "Regression",
     emptyPage: "No cases on this page.",
     prev: "Previous",
     next: "Next",
@@ -458,9 +536,13 @@ function esc(value) {
 }
 
 async function load() {
-  const response = await fetch("/api/postman/sync", { method: "POST" });
-  const payload = await response.json();
-  state = payload.state;
+  const response = await fetch("/api/state");
+  if (response.status === 401) {
+    sessionUser = null;
+    renderLogin();
+    return;
+  }
+  state = await response.json();
   status = "";
   const newest = prompt().runs[0];
   if (!lastRun) lastRun = newest || null;
@@ -509,6 +591,103 @@ function formatWhen(iso) {
   return date.toLocaleString(locale, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
+function versionWhen(version) {
+  const when = formatWhen(version.created_at);
+  return version.author_name ? `${when} by ${version.author_name}` : when;
+}
+
+function activityLine(item) {
+  const when = formatWhen(item.created_at);
+  const text = t(`log_${item.kind}`, { detail: item.detail || "" });
+  if (String(item.kind).startsWith("prompt") && item.actor) return `${when} by ${item.actor} ${text}`;
+  return `${when} ${text}`;
+}
+
+function activityHtml() {
+  const items = (state && state.activity) || [];
+  if (!items.length) return "";
+  return `
+    <div class="activity" aria-label="${esc(t("activity"))}">
+      ${items.map((item) => `<p>${esc(activityLine(item))}</p>`).join("")}
+    </div>
+  `;
+}
+
+function renderLogin() {
+  applyLang();
+  app.innerHTML = `
+    <div class="page-tools">${langSwitch()}</div>
+    <form class="login-card" id="login-form">
+      <h2>${esc(t("signIn"))}</h2>
+      <label for="login-email">${esc(t("loginEmail"))}</label>
+      <input id="login-email" type="email" autocomplete="username" placeholder="${esc(t("loginEmailPh"))}" value="${esc(loginEmail)}" />
+      <label for="login-code">${esc(t("otpCode"))}</label>
+      <input id="login-code" inputmode="numeric" autocomplete="one-time-code" placeholder="${esc(t("otpPh"))}" value="${esc(loginCode)}" />
+      ${loginNotice ? `<p class="note">${esc(loginNotice)}</p>` : ""}
+      ${loginError ? `<p class="row-error">${esc(loginError)}</p>` : ""}
+      <div class="row">
+        <button type="button" id="send-code">${esc(t("sendOtp"))}</button>
+        <button type="submit" class="primary">${esc(t("signIn"))}</button>
+      </div>
+    </form>
+  `;
+  document.querySelectorAll("[data-lang]").forEach((button) => {
+    button.onclick = () => {
+      keepLoginFields();
+      lang = button.dataset.lang;
+      localStorage.setItem("phoenix-lang", lang);
+      renderLogin();
+    };
+  });
+  document.querySelector("#send-code").onclick = () => sendLoginCode();
+  document.querySelector("#login-form").onsubmit = async (event) => {
+    event.preventDefault();
+    keepLoginFields();
+    loginError = "";
+    const response = await fetch("/api/auth/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: loginEmail, code: loginCode }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      loginError = payload.detail || t("requestFailed");
+      renderLogin();
+      return;
+    }
+    sessionUser = payload;
+    loginCode = "";
+    loginNotice = "";
+    loginError = "";
+    await load();
+    refreshHealth();
+  };
+}
+
+function keepLoginFields() {
+  const email = document.querySelector("#login-email");
+  const code = document.querySelector("#login-code");
+  if (email) loginEmail = email.value.trim();
+  if (code) loginCode = code.value.trim();
+}
+
+function systemLocale() {
+  return (navigator.languages && navigator.languages[0]) || navigator.language || "en";
+}
+
+async function sendLoginCode() {
+  keepLoginFields();
+  loginError = "";
+  const response = await fetch("/api/auth/otp", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: loginEmail, locale: systemLocale() }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) loginError = payload.detail || t("requestFailed");
+  renderLogin();
+}
+
 function excerpt(text) {
   const line = String(text || "").replace(/\s+/g, " ").trim();
   if (!line) return "";
@@ -555,6 +734,11 @@ async function send(url, options) {
   const payload = await response.json();
   busy = false;
   status = "";
+  if (response.status === 401) {
+    sessionUser = null;
+    renderLogin();
+    return null;
+  }
   if (!response.ok) {
     laneError = payload.detail || t("requestFailed");
     render();
@@ -579,7 +763,10 @@ function render() {
   const draftText = draftBuffer === null ? current.draft : draftBuffer;
   applyLang();
   app.innerHTML = `
-    <div class="page-tools">${langSwitch()}</div>
+    <div class="page-tools">
+      ${sessionUser ? `<span class="who">${esc(sessionUser.name)}</span><button type="button" id="logout">${esc(t("signOut"))}</button>` : ""}
+      ${langSwitch()}
+    </div>
     <section class="sheet intake-bar case-pane">
       <form id="case-form" class="intake-row">
         <label class="dropzone" id="dropzone">
@@ -651,16 +838,17 @@ function renderVersions(current, workflow, viewing, draftText) {
               </span>
               <span class="ver-remark">${esc(version.remark || t("noRemark"))}</span>
               <span class="ver-preview">${esc(excerpt(version.body))}</span>
-              <span class="ver-meta">${esc(formatWhen(version.created_at))}</span>
+              <span class="ver-meta">${esc(versionWhen(version))}</span>
             </button>
           `).join("")}
         </div>
+        ${activityHtml()}
       </aside>
       <div class="version-body">
         <div class="version-head">
           <h2>${viewing ? `#${viewing.number}` : esc(t("draft"))}</h2>
           <div class="row">
-            ${viewing ? `<p class="note">${esc(formatWhen(viewing.created_at))}</p>` : ""}
+            ${viewing ? `<p class="note">${esc(versionWhen(viewing))}</p>` : ""}
             ${viewing ? `<button type="button" id="pin-version" ${busy ? "disabled" : ""}>${esc(t("pinWorkflow"))}</button>` : ""}
           </div>
         </div>
@@ -706,7 +894,7 @@ function targetPicker(targets, targetId) {
         ${targets.map((target) => `
           <button type="button" class="target-option" role="option" data-target-pick="${target.id}" aria-selected="${target.id === targetId}">${esc(target.name)}</button>
         `).join("")}
-        <button type="button" class="target-option target-resync" id="sync-postman" ${busy ? "disabled" : ""}>${esc(t("resync"))}</button>
+        <button type="button" class="target-option target-add" id="add-target">${esc(t("addTarget"))}</button>
       </div>
       <input type="hidden" id="try-target" value="${targetId}">
     </div>
@@ -714,7 +902,30 @@ function targetPicker(targets, targetId) {
   `;
 }
 
+function addTargetHtml() {
+  return `
+    <dialog class="target-editor" id="target-editor">
+      <form>
+        <h2>${esc(t("addTarget"))}</h2>
+        <label for="target-name">${esc(t("nickname"))}</label>
+        <input id="target-name" name="name" value="" />
+        <label for="target-url">${esc(t("url"))}</label>
+        <input id="target-url" name="base_url" value="" placeholder="https://" />
+        <label for="target-model">${esc(t("modelId"))}</label>
+        <input id="target-model" name="model" value="" />
+        <label for="target-key">${esc(t("enterKey"))}</label>
+        <input id="target-key" name="api_key" type="password" autocomplete="off" />
+        <p class="row-error" id="target-form-error" hidden></p>
+        <div class="row">
+          <button type="submit" class="primary">${esc(t("saveTarget"))}</button>
+        </div>
+      </form>
+    </dialog>
+  `;
+}
+
 function targetEditorHtml(targets) {
+  if (addingTarget) return addTargetHtml();
   const target = targets.find((item) => item.id === targetEditorId);
   if (!target) return "";
   const keyLabel = target.has_key ? t("updateKey") : t("enterKey");
@@ -804,14 +1015,18 @@ function bindTargetPicker() {
           return;
         }
         clearTimeout(targetCloseTimer);
-        targetCloseTimer = setTimeout(closeTargetMenu, 280);
+        targetCloseTimer = setTimeout(() => {
+          closeTargetMenu();
+          refreshHealth();
+        }, 280);
       };
     });
-    const resync = document.querySelector("#sync-postman");
-    if (resync) {
-      resync.onclick = () => {
+    const add = document.querySelector("#add-target");
+    if (add) {
+      add.onclick = () => {
         closeTargetMenu();
-        load();
+        addingTarget = true;
+        render();
       };
     }
     if (targetMenuOpen) placeTargetMenu();
@@ -824,7 +1039,39 @@ function bindTargetPicker() {
   };
   dialog.onclose = () => {
     targetEditorId = null;
+    addingTarget = false;
   };
+  if (addingTarget) {
+    dialog.querySelector("form").onsubmit = async (event) => {
+      event.preventDefault();
+      const data = Object.fromEntries(new FormData(event.target));
+      const base = (data.base_url || "").trim();
+      const key = (data.api_key || "").trim();
+      const model = (data.model || "").trim();
+      const error = dialog.querySelector("#target-form-error");
+      if (!base.startsWith("http") || !key || !model) {
+        error.hidden = false;
+        error.textContent = t("targetNeed");
+        return;
+      }
+      dialog.onclose = null;
+      addingTarget = false;
+      const payload = await send("/api/targets", {
+        method: "POST",
+        body: { name: data.name || "", base_url: base, api_key: key, model },
+      });
+      if (!payload) {
+        addingTarget = true;
+        render();
+        return;
+      }
+      selectedTargetId = payload.id;
+      status = t("targetAdded");
+      render();
+      refreshHealth();
+    };
+    return;
+  }
   dialog.querySelector("form").onsubmit = async (event) => {
     event.preventDefault();
     const data = Object.fromEntries(new FormData(event.target));
@@ -841,6 +1088,7 @@ function bindTargetPicker() {
     }
     status = data.api_key ? t("keySaved") : t("targetSaved");
     render();
+    refreshHealth();
   };
   dialog.querySelector("[data-delete-target]").onclick = async () => {
     const id = targetEditorId;
@@ -854,6 +1102,7 @@ function bindTargetPicker() {
     if (selectedTargetId === id) selectedTargetId = null;
     status = t("targetDeleted");
     render();
+    refreshHealth();
   };
 }
 
@@ -971,31 +1220,25 @@ function noteLane(run) {
   laneError = !cameBack(run) && run.error ? run.error : "";
 }
 
-function keyedTargets() {
-  return ((state && state.targets) || []).filter((target) => target.has_key);
-}
-
-function targetSentence() {
-  const targets = keyedTargets();
-  if (!targets.length) return "";
-  return t("targetsFound", { n: targets.length });
+function healthIssueText() {
+  const name = health.name || "";
+  const status = health.status || "";
+  if (health.code === "no_target") return t("healthNone");
+  if (health.code === "no_key") return t("healthNoKey", { name });
+  if (health.code === "unreachable") return t("healthUnreachable", { name });
+  if (health.code === "rejected") return t("healthRejected", { name });
+  if (health.code === "http") return t("healthHttp", { name, status });
+  const issues = (health.issues || []).filter(Boolean);
+  return issues.join(" ");
 }
 
 function healthView() {
   if (busy) return { tone: "yellow", text: status || t("working") };
-  const issues = health.ok === false ? (health.issues || []).filter(Boolean) : [];
-  const targets = targetSentence();
-  if (issues.length) {
-    const text = targets ? `${issues.join(" ")}${targets}` : issues.join(" ");
-    return { tone: "red", text };
-  }
-  if (laneError) return { tone: "red", text: targets ? `${laneError} ${targets}` : laneError };
-  if (cameBack(lastRun)) {
-    const back = t("ranBack", { product: resultLabel(lastRun) });
-    return { tone: "green", text: targets ? `${back}${targets}` : back };
-  }
+  if (health.ok === false) return { tone: "red", text: healthIssueText() };
+  if (laneError) return { tone: "red", text: laneError };
+  if (cameBack(lastRun)) return { tone: "green", text: t("ranBack", { product: resultLabel(lastRun) }) };
   if (health.ok === null) return { tone: "yellow", text: t("checking") };
-  return { tone: "green", text: targets ? `${t("linkOpen")}${targets}` : t("linkOpen") };
+  return { tone: "green", text: t("linkOpen") };
 }
 
 function healthLineHtml() {
@@ -1004,9 +1247,16 @@ function healthLineHtml() {
 }
 
 async function refreshHealth() {
-  if (busy) return;
+  if (busy || !sessionUser || !state) return;
+  const id = chosenTargetId(prompt());
+  const query = id ? `?target_id=${encodeURIComponent(id)}` : "";
   try {
-    const response = await fetch("/api/health");
+    const response = await fetch(`/api/health${query}`);
+    if (response.status === 401) {
+      sessionUser = null;
+      renderLogin();
+      return;
+    }
     health = await response.json();
   } catch (err) {
     health = { ok: false, issues: [t("healthDown")] };
@@ -1217,6 +1467,15 @@ async function runScope(scope) {
 function bind() {
   bindSplit();
   bindTargetPicker();
+  const logout = document.querySelector("#logout");
+  if (logout) {
+    logout.onclick = async () => {
+      await fetch("/api/auth/logout", { method: "POST" });
+      sessionUser = null;
+      state = null;
+      renderLogin();
+    };
+  }
   document.querySelectorAll("[data-lang]").forEach((button) => {
     button.onclick = () => {
       lang = button.dataset.lang;
@@ -1655,5 +1914,15 @@ async function uploadCases(fileList) {
   }
 }
 
-load().then(() => refreshHealth());
+async function boot() {
+  const me = await fetch("/api/auth/me");
+  if (!me.ok) {
+    renderLogin();
+    return;
+  }
+  sessionUser = await me.json();
+  await load();
+  refreshHealth();
+}
+boot();
 setInterval(refreshHealth, 15000);

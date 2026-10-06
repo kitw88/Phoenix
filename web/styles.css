@@ -277,8 +277,53 @@ button.version-item[aria-pressed="true"] {
 .page-tools {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
+  gap: 10px;
   margin: 0 0 2px;
 }
+
+.who {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+#logout {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  min-width: 0;
+  min-height: 0;
+  padding: 0 4px;
+  font-size: 12px;
+  letter-spacing: 0;
+}
+
+.login-card {
+  width: min(380px, 100%);
+  margin: 12vh auto 0;
+  background: var(--sheet);
+  border: 1px solid var(--line);
+  padding: 22px 20px 18px;
+}
+
+.login-card h2 {
+  margin: 0 0 12px;
+  font-size: 20px;
+}
+
+.login-card .row { margin-top: 16px; }
+
+.activity {
+  border-top: 1px solid var(--line);
+  max-height: 168px;
+  overflow: auto;
+  padding: 8px 12px 10px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.activity p { margin: 0 0 4px; }
 
 .lang-switch {
   display: flex;
@@ -392,13 +437,14 @@ button.version-item[aria-pressed="true"] {
 
 .target-option[aria-selected="true"] { background: rgba(184, 67, 31, 0.08); }
 
-.target-resync {
+.target-add {
   position: sticky;
   bottom: 0;
   background: #ece8e2;
+  color: var(--muted);
 }
 
-.target-resync:hover { background: #e3ddd4; }
+.target-add:hover { background: #e3ddd4; }
 
 .target-editor {
   border: 1px solid var(--line);
@@ -423,6 +469,8 @@ button.version-item[aria-pressed="true"] {
   letter-spacing: 0;
   font-size: 12px;
 }
+
+.target-editor .row { margin-top: 16px; }
 
 .target-editor [data-delete-target] {
   margin-left: auto;
@@ -607,11 +655,13 @@ pre {
 }
 .suite-table td.name:has(.icon-hit) .name-text { max-width: calc(100% - 22px); }
 .suite-table .label { width: 8rem; white-space: nowrap; }
-.suite-table .verdict { width: 5rem; white-space: nowrap; }
+.suite-table .verdict { width: 10.5rem; white-space: nowrap; }
+.suite-table td.verdict .stamp { vertical-align: middle; }
 .suite-table td.actions,
 .suite-table th.actions {
-  width: 6.5rem;
+  width: 7.25rem;
   overflow: visible;
+  padding-left: 16px;
 }
 .icon-row {
   display: grid;

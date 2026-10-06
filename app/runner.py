@@ -5,6 +5,29 @@ from app import postman_run, store
 from app.postman_sync import PostmanUnavailable
 
 
+async def check_target(target_id: int | None) -> dict:
+    target = store.target_for_health(target_id)
+    if not target:
+        return {"ok": False, "code": "no_target", "name": "", "status": 0}
+    name = target.get("name") or ""
+    key = (target.get("api_key") or "").strip()
+    base = (target.get("base_url") or "").strip().rstrip("/")
+    if not key or not base:
+        return {"ok": False, "code": "no_key", "name": name, "status": 0}
+    url = base + "/models"
+    headers = {"Authorization": f"Bearer {key}"}
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            response = await client.get(url, headers=headers)
+    except Exception:
+        return {"ok": False, "code": "unreachable", "name": name, "status": 0}
+    if response.status_code in {401, 403}:
+        return {"ok": False, "code": "rejected", "name": name, "status": response.status_code}
+    if response.status_code >= 400:
+        return {"ok": False, "code": "http", "name": name, "status": response.status_code}
+    return {"ok": True, "code": "ok", "name": name, "status": response.status_code}
+
+
 async def execute(
     *,
     prompt_id: int,

@@ -139,3 +139,26 @@ def test_same_filename_updates_the_existing_case(tmp_path, monkeypatch):
         source_bytes=b"newer",
     )
     assert store.get_case(first)["expectation"] == "Phoenix"
+
+
+def test_create_target_keeps_url_key_and_model(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "DB_PATH", tmp_path / "phoenix.sqlite")
+    store.init_db()
+    target_id = store.create_target(
+        "",
+        "https://uat.example:8082",
+        "secret-key",
+        "deepseek-flash",
+    )
+    target = store.get_target(target_id)
+    assert target["name"] == "uat.example:8082 · deepseek-flash"
+    assert target["base_url"] == "https://uat.example:8082"
+    assert target["model"] == "deepseek-flash"
+    assert target["api_key"] == "secret-key"
+    assert target["seen"] == 1
+    try:
+        store.create_target("x", "not-a-url", "key", "model")
+    except ValueError as exc:
+        assert str(exc) == "base_url"
+    else:
+        raise AssertionError("expected a url error")

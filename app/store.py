@@ -1,6 +1,10 @@
+import hashlib
+import hmac
 import json
+import secrets
 import sqlite3
-from datetime import datetime, timezone
+from contextvars import ContextVar
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -8,6 +12,8 @@ DB_PATH = ROOT / "data" / "phoenix.sqlite"
 PROMPT_PATH = ROOT / "postman" / "ds-v4.1-product-classifier" / "classifier-prompt.txt"
 
 from app.evaluate import PRODUCT_LABELS
+
+actor: ContextVar[dict | None] = ContextVar("phoenix_actor", default=None)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS api_targets (
@@ -132,6 +138,44 @@ def _migrate(conn: sqlite3.Connection) -> None:
     version_columns = {row[1] for row in conn.execute("PRAGMA table_info(prompt_versions)")}
     if "remark" not in version_columns:
         conn.execute("ALTER TABLE prompt_versions ADD COLUMN remark TEXT NOT NULL DEFAULT ''")
+    if "author_name" not in version_columns and "author_name" not in {
+        row[1] for row in conn.execute("PRAGMA table_info(prompt_versions)")
+    }:
+        conn.execute("ALTER TABLE prompt_versions ADD COLUMN author_name TEXT NOT NULL DEFAULT ''")
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY,
+            email TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS sessions (
+            token TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+        CREATE TABLE IF NOT EXISTS otp_codes (
+            id INTEGER PRIMARY KEY,
+            email TEXT NOT NULL,
+            code_hash TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            used INTEGER NOT NULL DEFAULT 0,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS activity (
+            id INTEGER PRIMARY KEY,
+            user_id INTEGER,
+            kind TEXT NOT NULL,
+            detail TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+        """
+    )
     prompt_columns = {row[1] for row in conn.execute("PRAGMA table_info(prompts)")}
     if "mismatch_review" not in prompt_columns:
         conn.execute("ALTER TABLE prompts ADD COLUMN mismatch_review TEXT NOT NULL DEFAULT ''")
@@ -174,6 +218,139 @@ def _now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+def _pepper() -> bytes:
+    path = DB_PATH.parent / "auth_pepper"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        return path.read_bytes()
+    value = secrets.token_bytes(32)
+    path.write_bytes(value)
+    return value
+
+
+def _otp_hash(email: str, code: str) -> str:
+    return hmac.new(_pepper(), f"{email}:{code}".encode(), hashlib.sha256).hexdigest()
+
+
+def add_activity(kind: str, detail: str = "") -> None:
+    user = actor.get()
+    if not user:
+        return
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO activity (user_id, kind, detail, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (user["id"], kind, detail, _now()),
+        )
+
+
+def issue_otp(email: str) -> str:
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    now = datetime.now(timezone.utc)
+    with connect() as conn:
+        recent = conn.execute(
+            "SELECT created_at FROM otp_codes WHERE email = ? ORDER BY id DESC LIMIT 1",
+            (email,),
+        ).fetchone()
+        if recent:
+            created = datetime.fromisoformat(recent["created_at"])
+            if now - created < timedelta(seconds=30):
+                raise RuntimeError("soon")
+        conn.execute("UPDATE otp_codes SET used = 1 WHERE email = ? AND used = 0", (email,))
+        conn.execute(
+            """
+            INSERT INTO otp_codes
+                (email, code_hash, expires_at, used, attempts, created_at)
+            VALUES (?, ?, ?, 0, 0, ?)
+            """,
+            (
+                email,
+                _otp_hash(email, code),
+                (now + timedelta(minutes=10)).replace(microsecond=0).isoformat(),
+                _now(),
+            ),
+        )
+    return code
+
+
+def consume_otp(email: str, code: str) -> dict | None:
+    digest = _otp_hash(email, code.strip())
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM otp_codes
+            WHERE email = ? AND used = 0
+            ORDER BY id DESC LIMIT 1
+            """,
+            (email,),
+        ).fetchone()
+        if not row:
+            return None
+        if row["expires_at"] < _now() or row["attempts"] >= 5:
+            conn.execute("UPDATE otp_codes SET used = 1 WHERE id = ?", (row["id"],))
+            return None
+        if not hmac.compare_digest(row["code_hash"], digest):
+            conn.execute(
+                "UPDATE otp_codes SET attempts = attempts + 1 WHERE id = ?",
+                (row["id"],),
+            )
+            return None
+        conn.execute("UPDATE otp_codes SET used = 1 WHERE id = ?", (row["id"],))
+        name = email.split("@", 1)[0]
+        existing = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
+        if existing:
+            user_id = existing["id"]
+            conn.execute("UPDATE users SET name = ? WHERE id = ?", (name, user_id))
+        else:
+            conn.execute(
+                "INSERT INTO users (email, name, created_at) VALUES (?, ?, ?)",
+                (email, name, _now()),
+            )
+            user_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    return {"id": int(user_id), "email": email, "name": name}
+
+
+def create_session(user_id: int) -> str:
+    token = secrets.token_urlsafe(32)
+    expires = (datetime.now(timezone.utc) + timedelta(days=14)).replace(microsecond=0).isoformat()
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO sessions (token, user_id, created_at, expires_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (token, user_id, _now(), expires),
+        )
+    return token
+
+
+def user_from_token(token: str | None) -> dict | None:
+    if not token:
+        return None
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT u.id, u.email, u.name, s.expires_at
+            FROM sessions s
+            JOIN users u ON u.id = s.user_id
+            WHERE s.token = ?
+            """,
+            (token,),
+        ).fetchone()
+    if not row or row["expires_at"] < _now():
+        return None
+    return {"id": row["id"], "email": row["email"], "name": row["name"]}
+
+
+def drop_session(token: str | None) -> None:
+    if not token:
+        return
+    with connect() as conn:
+        conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+
+
 def _target_public(row: sqlite3.Row) -> dict:
     key = row["api_key"] or ""
     return {
@@ -209,6 +386,7 @@ def snapshot() -> dict:
                     "number": row["number"],
                     "body": row["body"],
                     "remark": row["remark"] or "",
+                    "author_name": row["author_name"] or "",
                     "created_at": row["created_at"],
                 }
                 for row in conn.execute(
@@ -262,7 +440,24 @@ def snapshot() -> dict:
                     "runs": runs,
                 }
             )
-    return {"targets": targets, "prompts": prompts}
+        activity = [
+            {
+                "kind": row["kind"],
+                "detail": row["detail"] or "",
+                "actor": row["actor"] or "",
+                "created_at": row["created_at"],
+            }
+            for row in conn.execute(
+                """
+                SELECT a.kind, a.detail, a.created_at, u.name AS actor
+                FROM activity a
+                LEFT JOIN users u ON u.id = a.user_id
+                ORDER BY a.id DESC
+                LIMIT 40
+                """
+            )
+        ]
+    return {"targets": targets, "prompts": prompts, "activity": activity}
 
 
 def _parsed_product(raw: str | None) -> str:
@@ -430,6 +625,49 @@ def apply_postman_targets(found: list[dict]) -> int:
             "SELECT COUNT(*) FROM api_targets WHERE seen = 1"
         ).fetchone()[0]
     return count
+
+
+def create_target(name: str, base_url: str, api_key: str, model: str) -> int:
+    base_url = base_url.strip().rstrip("/")
+    api_key = api_key.strip()
+    model = model.strip()
+    if not base_url.startswith("http"):
+        raise ValueError("base_url")
+    if not api_key:
+        raise ValueError("api_key")
+    if not model:
+        raise ValueError("model")
+    host = base_url.split("//", 1)[-1].split("/")[0]
+    name = name.strip() or f"{host} · {model}"
+    fingerprint = f"{base_url}\n{model}"
+    with connect() as conn:
+        conn.execute("DELETE FROM dismissed_targets WHERE fingerprint = ?", (fingerprint,))
+        current = conn.execute(
+            "SELECT id FROM api_targets WHERE fingerprint = ?",
+            (fingerprint,),
+        ).fetchone()
+        if current:
+            conn.execute(
+                """
+                UPDATE api_targets
+                SET name = ?, base_url = ?, model = ?, api_key = ?, seen = 1, fingerprint = ?
+                WHERE id = ?
+                """,
+                (name, base_url, model, api_key, fingerprint, current["id"]),
+            )
+            new_id = int(current["id"])
+        else:
+            conn.execute(
+                """
+                INSERT INTO api_targets
+                    (name, base_url, model, api_key, reasoning_effort, is_default, fingerprint, seen)
+                VALUES (?, ?, ?, ?, 'low', 0, ?, 1)
+                """,
+                (name, base_url, model, api_key, fingerprint),
+            )
+            new_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+        _hide_keyless_targets(conn)
+    return new_id
 
 
 def update_target(target_id: int, fields: dict) -> None:
@@ -803,12 +1041,14 @@ def publish_version(prompt_id: int, remark: str = "") -> dict:
             (prompt_id,),
         ).fetchone()[0]
         created_at = _now()
+        author_name = (actor.get() or {}).get("name") or ""
         conn.execute(
             """
-            INSERT INTO prompt_versions (prompt_id, number, body, remark, created_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO prompt_versions
+                (prompt_id, number, body, remark, created_at, author_name)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (prompt_id, number, body, remark.strip(), created_at),
+            (prompt_id, number, body, remark.strip(), created_at, author_name),
         )
         version_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         step = conn.execute(
@@ -830,6 +1070,7 @@ def publish_version(prompt_id: int, remark: str = "") -> dict:
             "body": body,
             "remark": remark.strip(),
             "created_at": created_at,
+            "author_name": author_name,
             "prompt_id": prompt_id,
         }
 
@@ -878,6 +1119,31 @@ def labeled_cases(prompt_id: int) -> list[dict]:
 def get_target(target_id: int) -> dict | None:
     with connect() as conn:
         row = conn.execute("SELECT * FROM api_targets WHERE id = ?", (target_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def target_for_health(target_id: int | None) -> dict | None:
+    with connect() as conn:
+        if target_id:
+            row = conn.execute(
+                "SELECT * FROM api_targets WHERE id = ? AND seen = 1",
+                (target_id,),
+            ).fetchone()
+            if row:
+                return dict(row)
+        row = conn.execute(
+            """
+            SELECT * FROM api_targets
+            WHERE seen = 1 AND is_default = 1
+            ORDER BY id
+            LIMIT 1
+            """
+        ).fetchone()
+        if row:
+            return dict(row)
+        row = conn.execute(
+            "SELECT * FROM api_targets WHERE seen = 1 ORDER BY id LIMIT 1"
+        ).fetchone()
     return dict(row) if row else None
 
 

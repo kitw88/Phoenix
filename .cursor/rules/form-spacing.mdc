@@ -1,0 +1,10 @@
+---
+description: Leave space between text inputs and the buttons under them
+alwaysApply: true
+---
+
+# Input and button spacing
+
+When a button sits under a text input, leave a visible gap. Use at least 16px. In this desk, that is `margin-top: 16px` on the button row, the same gap as `.login-card .row` and `.target-editor .row`.
+
+Do not place the button flush against the field.
