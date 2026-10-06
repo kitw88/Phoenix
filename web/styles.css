@@ -314,16 +314,48 @@ button.version-item[aria-pressed="true"] {
 .login-card .row { margin-top: 16px; }
 
 .activity {
-  border-top: 1px solid var(--line);
-  max-height: 168px;
-  overflow: auto;
-  padding: 8px 12px 10px;
+  margin: 10px 0 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
   color: var(--muted);
-  font-size: 12px;
+  font-size: 11px;
   line-height: 1.45;
 }
 
-.activity p { margin: 0 0 4px; }
+.activity p { margin: 0 0 2px; }
+
+.activity-more {
+  margin: 0 0 0 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0;
+  min-height: 0;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.activity-more:hover { color: var(--ink); }
+
+.activity-log {
+  border: 1px solid var(--line);
+  background: var(--sheet);
+  color: var(--muted);
+  width: min(560px, calc(100vw - 32px));
+  max-height: min(70vh, 480px);
+  overflow: auto;
+  padding: 16px 18px;
+  box-shadow: var(--shadow);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.activity-log::backdrop { background: rgba(30, 25, 20, 0.28); }
+
+.activity-log p { margin: 0 0 6px; }
 
 .lang-switch {
   display: flex;
@@ -640,6 +672,106 @@ pre {
   font-size: 12px;
 }
 
+.suite-table .pick { width: 2rem; padding-right: 0; }
+.suite-table input.pick-box {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid rgba(30, 25, 20, 0.2);
+  outline: none;
+  background: #fff;
+  box-shadow: none;
+  vertical-align: middle;
+}
+.suite-table input.pick-box:checked {
+  background: #fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 14 14'%3E%3Cpath d='M3 7.2 5.8 10 11 4' fill='none' stroke='%231e1914' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 12px 12px no-repeat;
+}
+.expect-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.funnel.on { color: var(--copper); }
+.expect-menu {
+  position: fixed;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  width: 240px;
+  padding: 8px;
+  overflow: hidden;
+  background: var(--sheet);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow);
+}
+.expect-menu[hidden] { display: none; }
+.expect-options {
+  min-height: 0;
+  overflow: auto;
+}
+.expect-search-row {
+  display: flex;
+  align-items: center;
+  flex: none;
+  gap: 8px;
+  margin: 16px 0 0;
+}
+.expect-search-row input {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+  margin: 0;
+}
+.expect-menu button.expect-clear {
+  width: 18px;
+  height: 18px;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+}
+.expect-menu button.expect-clear .line-icon {
+  width: 18px;
+  height: 18px;
+}
+.expect-menu button.expect-clear:hover:not(:disabled) { color: var(--ink); }
+.expect-menu button.expect-clear:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.expect-menu button {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  padding: 6px 8px;
+}
+.expect-menu button[aria-pressed="true"] { background: rgba(184, 67, 31, 0.08); }
+.expect-menu .note { margin: 0; font-size: 12px; }
+.expect-menu.label-menu {
+  width: 180px;
+  padding: 4px;
+  overflow: auto;
+}
+button.expect-add {
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 0;
+  cursor: pointer;
+}
+button.expect-add:hover,
+button.expect-add[aria-expanded="true"] { color: var(--ink); }
 .suite-table .name { width: auto; }
 .suite-table td.name {
   overflow: visible;
@@ -886,11 +1018,17 @@ pre {
     color: var(--muted);
     text-transform: uppercase;
   }
+  .suite-table .pick,
   .suite-table .label,
   .suite-table .verdict,
   .suite-table .actions {
     width: auto;
     white-space: normal;
+  }
+  .suite-table input.pick-box {
+    min-height: 0;
+    width: 14px;
+    height: 14px;
   }
   .suite-table td.actions {
     width: auto;

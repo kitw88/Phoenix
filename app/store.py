@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DB_PATH = ROOT / "data" / "phoenix.sqlite"
 PROMPT_PATH = ROOT / "postman" / "ds-v4.1-product-classifier" / "classifier-prompt.txt"
 
-from app.evaluate import PRODUCT_LABELS
+from app.evaluate import PRODUCT_LABELS, judge
 
 actor: ContextVar[dict | None] = ContextVar("phoenix_actor", default=None)
 
@@ -831,6 +831,64 @@ def save_case(
         return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
 
+def settle_matching_runs(workflow_id: int) -> None:
+    """Score an unlabeled run once its expectation is known.
+
+    A case can be run before it has an expectation. When that expectation is
+    added and the prompt text is still the one that produced the run, a
+    matching model result is a pass. A changed prompt stays unscored.
+    """
+    with connect() as conn:
+        step = conn.execute(
+            """
+            SELECT prompt_id FROM workflow_steps
+            WHERE workflow_id = ? AND position = 1
+            """,
+            (workflow_id,),
+        ).fetchone()
+        if not step:
+            return
+        prompt = conn.execute(
+            "SELECT draft, expectation_field FROM prompts WHERE id = ?",
+            (step["prompt_id"],),
+        ).fetchone()
+        if not prompt:
+            return
+        draft = prompt["draft"] or ""
+        field = prompt["expectation_field"] or "product"
+        rows = conn.execute(
+            """
+            SELECT r.id, r.body, r.parsed_json, c.expectation
+            FROM cases c
+            JOIN runs r ON r.id = (
+                SELECT r2.id FROM runs r2
+                WHERE r2.case_id = c.id
+                ORDER BY r2.id DESC
+                LIMIT 1
+            )
+            WHERE c.workflow_id = ?
+              AND c.expectation IS NOT NULL AND trim(c.expectation) != ''
+              AND r.passed IS NULL
+            """,
+            (workflow_id,),
+        ).fetchall()
+        for row in rows:
+            if (row["body"] or "") != draft:
+                continue
+            parsed = None
+            if row["parsed_json"]:
+                try:
+                    parsed = json.loads(row["parsed_json"])
+                except json.JSONDecodeError:
+                    parsed = None
+            if judge(parsed, field, row["expectation"]) is not True:
+                continue
+            conn.execute(
+                "UPDATE runs SET passed = 1, expectation = ? WHERE id = ? AND passed IS NULL",
+                (row["expectation"], row["id"]),
+            )
+
+
 def case_page(
     workflow_id: int,
     *,
@@ -839,9 +897,11 @@ def case_page(
     page: int,
     page_size: int,
     version_id: int | None,
+    expectations: list[str] | None = None,
 ) -> dict:
     page = max(page, 1)
     page_size = min(max(page_size, 1), 100)
+    settle_matching_runs(workflow_id)
     labeled = "c.expectation IS NOT NULL AND trim(c.expectation) != ''"
     suite_sql = labeled if suite == "test" else f"NOT ({labeled})"
     run_filter = ""
@@ -855,6 +915,13 @@ def case_page(
         "pass": "AND passed = 1",
         "unscored": "AND passed IS NULL",
     }.get(result, "")
+    chosen = [item.strip() for item in (expectations or []) if item and item.strip()]
+    expect_sql = ""
+    expect_params: list = []
+    if chosen:
+        marks = ",".join("?" for _ in chosen)
+        expect_sql = f"AND c.expectation IN ({marks})"
+        expect_params = chosen
     scored_sql = f"""
         SELECT c.id, c.title, c.expectation, c.source_name,
                CASE WHEN c.source_bytes IS NULL THEN 0 ELSE 1 END AS has_source,
@@ -867,9 +934,9 @@ def case_page(
             ORDER BY r2.id DESC
             LIMIT 1
         )
-        WHERE c.workflow_id = ? AND {suite_sql}
+        WHERE c.workflow_id = ? AND {suite_sql} {expect_sql}
     """
-    scored_params = [*version_params, workflow_id]
+    scored_params = [*version_params, workflow_id, *expect_params]
     with connect() as conn:
         totals = conn.execute(
             """
@@ -991,12 +1058,15 @@ def cases_for_scope(prompt_id: int, version_id: int | None, scope: str) -> list[
         ).fetchone()
         if not step:
             return []
+        workflow_id = step["workflow_id"]
+    settle_matching_runs(workflow_id)
+    with connect() as conn:
         version_sql = ""
         params: list = []
         if version_id is not None:
             version_sql = "AND r.prompt_version_id = ?"
             params.append(version_id)
-        params.append(step["workflow_id"])
+        params.append(workflow_id)
         rows = conn.execute(
             f"""
             SELECT c.id, (
@@ -1095,6 +1165,35 @@ def pin_step(prompt_id: int, version_id: int | None, target_id: int | None) -> N
                 step["workflow_id"],
             ),
         )
+
+
+def cases_by_ids(prompt_id: int, case_ids: list[int]) -> list[dict]:
+    wanted = []
+    seen = set()
+    for case_id in case_ids:
+        if case_id in seen:
+            continue
+        seen.add(int(case_id))
+        wanted.append(int(case_id))
+    if not wanted:
+        return []
+    with connect() as conn:
+        step = conn.execute(
+            "SELECT workflow_id FROM workflow_steps WHERE prompt_id = ? AND position = 1",
+            (prompt_id,),
+        ).fetchone()
+        if not step:
+            return []
+        marks = ",".join("?" for _ in wanted)
+        rows = conn.execute(
+            f"""
+            SELECT id, workflow_id, title, input_text, expectation FROM cases
+            WHERE workflow_id = ? AND id IN ({marks})
+            ORDER BY id
+            """,
+            [step["workflow_id"], *wanted],
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def labeled_cases(prompt_id: int) -> list[dict]:

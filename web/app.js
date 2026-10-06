@@ -28,6 +28,10 @@ let loginEmail = "";
 let loginCode = "";
 let loginNotice = "";
 let loginError = "";
+let picked = new Set();
+let expectFocus = false;
+let expectOutside = false;
+let labelOutside = false;
 let table = {
   suite: "test",
   result: "all",
@@ -38,6 +42,10 @@ let table = {
   counts: { labeled: 0, pending: 0, pass: 0, fail: 0, unscored: 0 },
   openId: null,
   detail: null,
+  expectFilter: [],
+  expectOpen: false,
+  expectQuery: "",
+  labelOpenId: null,
 };
 let lang = localStorage.getItem("phoenix-lang") || "en";
 if (!["hant", "hans", "en"].includes(lang)) lang = "hant";
@@ -72,6 +80,7 @@ const COPY = {
     runAll: "全部跑",
     runFail: "跑未通過",
     runUnscored: "跑未回歸",
+    runSelected: "跑已選",
     keyKept: "Key · 已留在評測系統",
     keyPh: "已保存，留空則不更改",
     updateKey: "更新 key",
@@ -99,6 +108,7 @@ const COPY = {
     otpCode: "驗證碼",
     otpPh: "6 位驗證碼",
     activity: "紀錄",
+    activityMore: "more",
     log_prompt_publish: "發布了 #{detail}",
     log_prompt_draft: "保存了草稿",
     log_prompt_remark: "改了版本備註",
@@ -122,7 +132,13 @@ const COPY = {
     failCount: "未通過 {n}",
     passCount: "通過 {n}",
     unscoredCount: "未回歸 {n}",
-    suiteTest: "測試集 {n}",
+    suiteTest: "資料集 {n}",
+    selectAll: "全選",
+    filterExpect: "篩選期望",
+    addExpect: "加入期望",
+    clearExpect: "清除選擇",
+    searchExpect: "搜尋",
+    filterNone: "沒有相符",
     suitePending: "待確認 {n}",
     pageSummary: "共 {n} 筆，每頁 50。",
     colName: "檔名",
@@ -159,6 +175,7 @@ const COPY = {
     scopeAll: "全部",
     scopeFail: "未通過",
     scopeUnscored: "未回歸",
+    scopeSelected: "已選",
     keySaved: "key 已留在評測系統",
     keyUnchanged: "未輸入新 key，評測系統裡的 key 保持不變",
     defaultChanged: "已改預設 API Target。已釘選的 Workflow 不會跟著改。",
@@ -222,6 +239,7 @@ const COPY = {
     runAll: "全部跑",
     runFail: "跑未通过",
     runUnscored: "跑未回归",
+    runSelected: "跑已选",
     keyKept: "Key · 已留在评测系统",
     keyPh: "已保存，留空则不更改",
     updateKey: "更新 key",
@@ -249,6 +267,7 @@ const COPY = {
     otpCode: "验证码",
     otpPh: "6 位验证码",
     activity: "记录",
+    activityMore: "more",
     log_prompt_publish: "发布了 #{detail}",
     log_prompt_draft: "保存了草稿",
     log_prompt_remark: "改了版本备注",
@@ -272,7 +291,13 @@ const COPY = {
     failCount: "未通过 {n}",
     passCount: "通过 {n}",
     unscoredCount: "未回归 {n}",
-    suiteTest: "测试集 {n}",
+    suiteTest: "数据集 {n}",
+    selectAll: "全选",
+    filterExpect: "筛选期望",
+    addExpect: "加入期望",
+    clearExpect: "清除选择",
+    searchExpect: "搜索",
+    filterNone: "没有相符",
     suitePending: "待确认 {n}",
     pageSummary: "共 {n} 笔，每页 50。",
     colName: "文件名",
@@ -309,6 +334,7 @@ const COPY = {
     scopeAll: "全部",
     scopeFail: "未通过",
     scopeUnscored: "未回归",
+    scopeSelected: "已选",
     keySaved: "key 已留在评测系统",
     keyUnchanged: "未输入新 key，评测系统里的 key 保持不变",
     defaultChanged: "已改预设 API Target。已钉选的 Workflow 不会跟着改。",
@@ -372,6 +398,7 @@ const COPY = {
     runAll: "Run all",
     runFail: "Run fail",
     runUnscored: "Run not regressed",
+    runSelected: "Run selected",
     keyKept: "Key · saved in the desk",
     keyPh: "Saved. Leave blank to keep it",
     updateKey: "Update key",
@@ -399,6 +426,7 @@ const COPY = {
     otpCode: "Code",
     otpPh: "6-digit code",
     activity: "Activity",
+    activityMore: "more",
     log_prompt_publish: "Published #{detail}",
     log_prompt_draft: "Saved the draft",
     log_prompt_remark: "Edited the version note",
@@ -422,7 +450,13 @@ const COPY = {
     failCount: "Fail {n}",
     passCount: "Pass {n}",
     unscoredCount: "Not regressed {n}",
-    suiteTest: "Test set {n}",
+    suiteTest: "Dataset {n}",
+    selectAll: "Select all",
+    filterExpect: "Filter expectation",
+    addExpect: "Add expectation",
+    clearExpect: "Clear selection",
+    searchExpect: "Search",
+    filterNone: "No match",
     suitePending: "To confirm {n}",
     pageSummary: "{n} cases, 50 per page.",
     colName: "File name",
@@ -459,6 +493,7 @@ const COPY = {
     scopeAll: "all",
     scopeFail: "fail",
     scopeUnscored: "not regressed",
+    scopeSelected: "selected",
     keySaved: "Key saved in the desk",
     keyUnchanged: "No new key entered. The saved key stays.",
     defaultChanged: "Default API target updated. A pinned workflow stays where it is.",
@@ -566,6 +601,7 @@ async function loadTable() {
     page_size: "50",
   });
   if (table.versionId) params.set("version_id", String(table.versionId));
+  for (const value of table.expectFilter) params.append("expectation", value);
   const response = await fetch(`/api/workflows/${workflow.id}/cases?${params}`);
   if (!response.ok) return;
   const payload = await response.json();
@@ -598,19 +634,35 @@ function versionWhen(version) {
 
 function activityLine(item) {
   const when = formatWhen(item.created_at);
-  const text = t(`log_${item.kind}`, { detail: item.detail || "" });
-  if (String(item.kind).startsWith("prompt") && item.actor) return `${when} by ${item.actor} ${text}`;
-  return `${when} ${text}`;
+  const text = t(`log_${item.kind}`, { detail: item.detail || "" }).trim();
+  return item.actor ? `${when} ${text} by ${item.actor}` : `${when} ${text}`;
 }
 
 function activityHtml() {
   const items = (state && state.activity) || [];
-  if (!items.length) return "";
+  const shown = items.slice(0, 3);
+  if (!shown.length) return "";
+  const more = items.length > shown.length
+    ? `<button type="button" class="activity-more" id="activity-more">${esc(t("activityMore"))}</button>`
+    : "";
   return `
     <div class="activity" aria-label="${esc(t("activity"))}">
-      ${items.map((item) => `<p>${esc(activityLine(item))}</p>`).join("")}
+      ${shown.map((item, index) => `<p>${esc(activityLine(item))}${index === shown.length - 1 ? more : ""}</p>`).join("")}
     </div>
   `;
+}
+
+function openActivityLog() {
+  const items = (state && state.activity) || [];
+  const dialog = document.createElement("dialog");
+  dialog.className = "activity-log";
+  dialog.innerHTML = items.map((item) => `<p>${esc(activityLine(item))}</p>`).join("");
+  dialog.addEventListener("click", (event) => {
+    if (event.target === dialog) dialog.close();
+  });
+  dialog.addEventListener("close", () => dialog.remove(), { once: true });
+  document.body.appendChild(dialog);
+  dialog.showModal();
 }
 
 function renderLogin() {
@@ -707,6 +759,9 @@ function captureEditor() {
   const search = document.querySelector("#version-search");
   if (search) versionQuery = search.value;
   focusSearch = search != null && document.activeElement === search;
+  const expectSearch = document.querySelector("#expect-search");
+  if (expectSearch) table.expectQuery = expectSearch.value;
+  expectFocus = expectSearch != null && document.activeElement === expectSearch;
   const batch = document.querySelector("#batch-expectation");
   if (batch) batchExpectation = batch.value;
   const scroll = document.querySelector(".version-scroll");
@@ -794,6 +849,7 @@ function render() {
     <section class="sheet suite">
       ${renderTable()}
     </section>
+    ${activityHtml()}
   `;
   bind();
   renderedView = { mode: view.mode, versionId: view.versionId };
@@ -805,6 +861,16 @@ function render() {
     const end = search.value.length;
     search.setSelectionRange(end, end);
   }
+  if (expectFocus) {
+    const search = document.querySelector("#expect-search");
+    if (search) {
+      search.focus();
+      const end = search.value.length;
+      search.setSelectionRange(end, end);
+    }
+  }
+  placeExpectMenu();
+  placeLabelMenu();
 }
 
 function renderVersions(current, workflow, viewing, draftText) {
@@ -842,7 +908,6 @@ function renderVersions(current, workflow, viewing, draftText) {
             </button>
           `).join("")}
         </div>
-        ${activityHtml()}
       </aside>
       <div class="version-body">
         <div class="version-head">
@@ -865,6 +930,7 @@ function renderVersions(current, workflow, viewing, draftText) {
           <button type="button" data-scope="all" ${busy ? "disabled" : ""}>${esc(t("runAll"))}</button>
           <button type="button" data-scope="fail" ${busy ? "disabled" : ""}>${esc(t("runFail"))}</button>
           <button type="button" data-scope="unscored" ${busy ? "disabled" : ""}>${esc(t("runUnscored"))}</button>
+          <button type="button" id="run-selected" ${busy || !picked.size ? "disabled" : ""}>${esc(t("runSelected"))}</button>
           ${targetPicker(targets, targetId)}
         </div>
       </div>
@@ -1284,15 +1350,28 @@ function renderTable() {
     <table class="suite-table">
       <thead>
         <tr>
+          <th class="pick"><input type="checkbox" class="pick-box" id="pick-all" aria-label="${esc(t("selectAll"))}"></th>
           <th class="name">${esc(t("colName"))}</th>
-          <th class="label">${esc(t("colExpect"))}</th>
+          <th class="label expect-head">
+            <span class="expect-label">
+              ${esc(t("colExpect"))}
+              <button type="button" class="icon-hit funnel ${table.expectFilter.length ? "on" : ""}" id="expect-filter" aria-label="${esc(t("filterExpect"))}" aria-expanded="${table.expectOpen ? "true" : "false"}">${lineIcon("funnel")}</button>
+            </span>
+            <div class="expect-menu" id="expect-menu" ${table.expectOpen ? "" : "hidden"}>
+              <div class="expect-options">${expectChoices()}</div>
+              <div class="expect-search-row">
+                <input id="expect-search" value="${esc(table.expectQuery)}" placeholder="${esc(t("searchExpect"))}" aria-label="${esc(t("searchExpect"))}">
+                <button type="button" class="icon-hit expect-clear" id="expect-clear" aria-label="${esc(t("clearExpect"))}" ${table.expectFilter.length ? "" : "disabled"}>${lineIcon("brush")}</button>
+              </div>
+            </div>
+          </th>
           <th class="label">${esc(t("colModel"))}</th>
           <th class="verdict">${esc(t("colScore"))}</th>
           <th class="actions"></th>
         </tr>
       </thead>
       <tbody>
-        ${table.rows.map(suiteRow).join("") || `<tr><td colspan="5">${esc(t("emptyPage"))}</td></tr>`}
+        ${table.rows.map(suiteRow).join("") || `<tr><td colspan="6">${esc(t("emptyPage"))}</td></tr>`}
       </tbody>
     </table>
     <div class="row">
@@ -1303,6 +1382,194 @@ function renderTable() {
   `;
 }
 
+function placeExpectMenu() {
+  const button = document.querySelector("#expect-filter");
+  const menu = document.querySelector("#expect-menu");
+  if (!button || !menu || menu.hidden) return;
+  const margin = 8;
+  const gap = 4;
+  const rect = button.getBoundingClientRect();
+  menu.style.maxHeight = `${Math.max(0, rect.top - gap - margin)}px`;
+  const width = menu.offsetWidth;
+  let left = rect.left;
+  if (left + width > window.innerWidth - margin) {
+    left = Math.max(margin, window.innerWidth - margin - width);
+  }
+  menu.style.left = `${left}px`;
+  const height = menu.offsetHeight;
+  menu.style.top = `${Math.max(margin, rect.top - gap - height)}px`;
+}
+
+function bindPicks() {
+  const ids = table.rows.map((row) => row.id);
+  const all = document.querySelector("#pick-all");
+  if (all) {
+    const selected = ids.filter((id) => picked.has(id)).length;
+    all.checked = ids.length > 0 && selected === ids.length;
+    all.indeterminate = selected > 0 && selected < ids.length;
+    all.onchange = () => {
+      if (all.checked) ids.forEach((id) => picked.add(id));
+      else ids.forEach((id) => picked.delete(id));
+      render();
+    };
+  }
+  document.querySelectorAll("[data-pick]").forEach((box) => {
+    box.onchange = () => {
+      const id = Number(box.dataset.pick);
+      if (box.checked) picked.add(id);
+      else picked.delete(id);
+      render();
+    };
+  });
+}
+
+function bindExpectFilter() {
+  if (!expectOutside) {
+    expectOutside = true;
+    document.addEventListener("mousedown", (event) => {
+      if (!table.expectOpen) return;
+      const menu = document.querySelector("#expect-menu");
+      const button = document.querySelector("#expect-filter");
+      if (menu && menu.contains(event.target)) return;
+      if (button && button.contains(event.target)) return;
+      if (event.target instanceof Element && event.target.closest("[data-add-expect], #label-menu")) return;
+      table.expectOpen = false;
+      render();
+    });
+    window.addEventListener("resize", () => {
+      if (table.expectOpen) placeExpectMenu();
+    });
+    window.addEventListener("scroll", () => {
+      if (table.expectOpen) placeExpectMenu();
+    }, true);
+  }
+  const opener = document.querySelector("#expect-filter");
+  if (opener) {
+    opener.onclick = () => {
+      table.expectOpen = !table.expectOpen;
+      if (table.expectOpen) table.labelOpenId = null;
+      render();
+    };
+  }
+  const search = document.querySelector("#expect-search");
+  if (search) {
+    search.oninput = () => {
+      table.expectQuery = search.value;
+      render();
+    };
+  }
+  const clear = document.querySelector("#expect-clear");
+  if (clear) {
+    clear.onclick = async () => {
+      if (!table.expectFilter.length) return;
+      table.expectFilter = [];
+      table.page = 1;
+      await loadTable();
+      render();
+    };
+  }
+  document.querySelectorAll("[data-expect]").forEach((button) => {
+    button.onclick = async () => {
+      const label = button.dataset.expect;
+      table.expectFilter = table.expectFilter.includes(label)
+        ? table.expectFilter.filter((item) => item !== label)
+        : [...table.expectFilter, label];
+      table.page = 1;
+      await loadTable();
+      render();
+    };
+  });
+}
+
+function labelMenu() {
+  const options = prompt().expectation_options || [];
+  const items = options.length
+    ? options.map((label) => `<button type="button" data-set-expect="${esc(label)}">${esc(label)}</button>`).join("")
+    : `<p class="note">${esc(t("filterNone"))}</p>`;
+  return `<div class="expect-menu label-menu" id="label-menu">${items}</div>`;
+}
+
+function expectationCell(row) {
+  if (row.expectation) return esc(row.expectation);
+  const open = table.labelOpenId === row.id;
+  return `<button type="button" class="expect-add" data-add-expect="${row.id}" aria-expanded="${open ? "true" : "false"}" aria-label="${esc(t("addExpect"))}" title="${esc(t("addExpect"))}">—</button>${open ? labelMenu() : ""}`;
+}
+
+function placeLabelMenu() {
+  const button = document.querySelector(`[data-add-expect="${table.labelOpenId}"]`);
+  const menu = document.querySelector("#label-menu");
+  if (!button || !menu) return;
+  const margin = 8;
+  const gap = 4;
+  const rect = button.getBoundingClientRect();
+  const spaceAbove = rect.top - gap - margin;
+  const spaceBelow = window.innerHeight - rect.bottom - gap - margin;
+  const openUp = spaceBelow < 220 && spaceAbove > spaceBelow;
+  menu.style.maxHeight = `${Math.max(0, openUp ? spaceAbove : spaceBelow)}px`;
+  const width = menu.offsetWidth;
+  let left = rect.left;
+  if (left + width > window.innerWidth - margin) {
+    left = Math.max(margin, window.innerWidth - margin - width);
+  }
+  menu.style.left = `${left}px`;
+  const height = menu.offsetHeight;
+  menu.style.top = openUp
+    ? `${Math.max(margin, rect.top - gap - height)}px`
+    : `${rect.bottom + gap}px`;
+}
+
+function bindLabelMenu() {
+  if (!labelOutside) {
+    labelOutside = true;
+    document.addEventListener("mousedown", (event) => {
+      if (table.labelOpenId == null) return;
+      const menu = document.querySelector("#label-menu");
+      if (menu && menu.contains(event.target)) return;
+      if (event.target instanceof Element && event.target.closest("[data-add-expect], #expect-filter")) return;
+      table.labelOpenId = null;
+      render();
+    });
+    window.addEventListener("resize", () => {
+      if (table.labelOpenId != null) placeLabelMenu();
+    });
+    window.addEventListener("scroll", () => {
+      if (table.labelOpenId != null) placeLabelMenu();
+    }, true);
+  }
+  document.querySelectorAll("[data-add-expect]").forEach((button) => {
+    button.onclick = () => {
+      const id = Number(button.dataset.addExpect);
+      table.labelOpenId = table.labelOpenId === id ? null : id;
+      table.expectOpen = false;
+      render();
+    };
+  });
+  document.querySelectorAll("[data-set-expect]").forEach((button) => {
+    button.onclick = async () => {
+      const label = button.dataset.setExpect;
+      const caseId = table.labelOpenId;
+      const row = table.rows.find((item) => item.id === caseId);
+      table.labelOpenId = null;
+      const payload = await send(`/api/workflows/${prompt().workflow.id}/cases`, {
+        method: "POST",
+        body: {
+          case_id: caseId,
+          title: row ? row.title : null,
+          expectation: label,
+        },
+      });
+      if (!payload) return;
+      await loadTable();
+      if (!table.rows.length && table.page > 1) {
+        table.page -= 1;
+        await loadTable();
+      }
+      status = t("addedSuite", { label });
+      render();
+    };
+  });
+}
+
 function verdictOf(row) {
   if (!row.expectation) return { kind: "open", label: t("pending") };
   if (row.passed === true) return { kind: "pass", label: t("pass") };
@@ -1310,9 +1577,22 @@ function verdictOf(row) {
   return { kind: "open", label: t("unscored") };
 }
 
+function expectChoices() {
+  const query = table.expectQuery.trim().toLowerCase();
+  const options = (prompt().expectation_options || []).filter((label) => (
+    !query || String(label).toLowerCase().includes(query)
+  ));
+  if (!options.length) return `<p class="note">${esc(t("filterNone"))}</p>`;
+  return options.map((label) => `
+    <button type="button" data-expect="${esc(label)}" aria-pressed="${table.expectFilter.includes(label)}">${esc(label)}</button>
+  `).join("");
+}
+
 function lineIcon(name) {
   const paths = {
     file: '<path d="M7 3.5h7.2L19 8.2V20.5H7z"/><path d="M14 3.5v5h5"/>',
+    funnel: '<path d="M4 5h16l-6.2 7.2V19l-3.6 2v-8.8z"/>',
+    brush: '<path d="M12 2.4v5.2"/><path d="M12 7.6C9.2 7.6 7.2 9.4 6.2 11.4L4.6 20.6h14.8l-1.6-9.2C16.8 9.4 14.8 7.6 12 7.6z"/><path d="M9 13.2v5.2M12 13.2v5.2M15 13.2v5.2"/>',
     result: '<path d="M5 7h14M5 12h14M5 17h9"/>',
     collapse: '<path d="M6 14.5 12 8.5l6 6"/>',
     rerun: '<path d="M19.5 12a7.5 7.5 0 1 1-2.1-5.2"/><path d="M19.5 4.5v4.2h-4.2"/>',
@@ -1327,11 +1607,12 @@ function suiteRow(row) {
   const open = table.openId === row.id && table.detail;
   return `
     <tr class="${row.passed === false ? "fail" : ""}">
+      <td class="pick"><input type="checkbox" class="pick-box" data-pick="${row.id}" ${picked.has(row.id) ? "checked" : ""} aria-label="${esc(row.title || t("untitled"))}"></td>
       <td class="name" title="${esc(row.title || t("untitled"))}">
         <span class="name-text">${esc(row.title || t("untitled"))}</span>
         ${row.has_source ? `<a class="icon-hit" href="/api/cases/${row.id}/file" data-tip="${esc(t("sourceFile"))}" aria-label="${esc(t("sourceFile"))}">${lineIcon("file")}</a>` : ""}
       </td>
-      <td class="label" data-label="${esc(t("colExpect"))}">${esc(row.expectation || "—")}</td>
+      <td class="label" data-label="${esc(t("colExpect"))}">${expectationCell(row)}</td>
       <td class="label" data-label="${esc(t("colModel"))}">${esc(row.product || "—")}</td>
       <td class="verdict" data-label="${esc(t("colScore"))}">
         <span class="stamp ${verdict.kind}">${esc(verdict.label)}</span>
@@ -1357,7 +1638,7 @@ function detailCells(detail, row) {
   const model = detail.parsed && detail.parsed.product ? detail.parsed.product : row.product || t("none");
   return `
     <tr class="detail-row ${row.passed === false ? "fail" : ""}">
-      <td colspan="5">
+      <td colspan="6">
         <p class="note">${esc(t("detailLine", { expect: row.expectation || t("none"), model }))} ${esc(detail.error || "")}</p>
         <div class="results">
           <article class="result-pane">
@@ -1438,6 +1719,7 @@ async function runScope(scope) {
       version_id: resolved.versionId,
       target_id: Number(document.querySelector("#try-target").value),
       scope,
+      case_ids: scope === "selected" ? [...picked] : [],
     },
   });
   if (!payload) return;
@@ -1458,7 +1740,7 @@ async function runScope(scope) {
     }
   }
   const note = resolved.fallback ? t("draftFallback", { n: resolved.number }) : "";
-  const scopeName = { all: t("scopeAll"), fail: t("scopeFail"), unscored: t("scopeUnscored") }[scope];
+  const scopeName = { all: t("scopeAll"), fail: t("scopeFail"), unscored: t("scopeUnscored"), selected: t("scopeSelected") }[scope];
   status = `${note}${t("runDone", { scope: scopeName, total: (payload.runs || []).length, fail: failed.length })}`;
   await reviewFailures(payload.runs);
   render();
@@ -1476,6 +1758,8 @@ function bind() {
       renderLogin();
     };
   }
+  const activityMore = document.querySelector("#activity-more");
+  if (activityMore) activityMore.onclick = openActivityLog;
   document.querySelectorAll("[data-lang]").forEach((button) => {
     button.onclick = () => {
       lang = button.dataset.lang;
@@ -1583,6 +1867,8 @@ function bind() {
   document.querySelectorAll("[data-scope]").forEach((button) => {
     button.onclick = () => runScope(button.dataset.scope);
   });
+  const runSelected = document.querySelector("#run-selected");
+  if (runSelected) runSelected.onclick = () => runScope("selected");
   const pin = document.querySelector("#pin-version");
   if (pin) {
     pin.onclick = async () => {
@@ -1713,10 +1999,17 @@ function bind() {
       table.page = 1;
       table.openId = null;
       table.detail = null;
+      table.expectFilter = [];
+      table.expectOpen = false;
+      table.expectQuery = "";
+      table.labelOpenId = null;
       await loadTable();
       render();
     };
   });
+  bindPicks();
+  bindExpectFilter();
+  bindLabelMenu();
   document.querySelectorAll("[data-result]").forEach((button) => {
     button.onclick = async () => {
       table.result = button.dataset.result;
@@ -1733,6 +2026,7 @@ function bind() {
     prev.onclick = async () => {
       table.page -= 1;
       table.openId = null;
+      table.labelOpenId = null;
       await loadTable();
       render();
     };
@@ -1741,6 +2035,7 @@ function bind() {
     next.onclick = async () => {
       table.page += 1;
       table.openId = null;
+      table.labelOpenId = null;
       await loadTable();
       render();
     };

@@ -71,6 +71,16 @@ def test_pdf_is_stored_and_failures_page_without_the_file(tmp_path, monkeypatch)
 
     assert page["total"] == 1
     assert page["counts"]["fail"] == 1
+    only_fcn = store.case_page(
+        workflow_id,
+        suite="test",
+        result="all",
+        page=1,
+        page_size=50,
+        version_id=None,
+        expectations=["FCN"],
+    )
+    assert [row["expectation"] for row in only_fcn["rows"]] == ["FCN"]
     assert page["counts"]["pass"] == 1
     row = page["rows"][0]
     assert row["id"] == missed
@@ -139,6 +149,84 @@ def test_same_filename_updates_the_existing_case(tmp_path, monkeypatch):
         source_bytes=b"newer",
     )
     assert store.get_case(first)["expectation"] == "Phoenix"
+
+
+def test_first_label_on_the_same_prompt_counts_as_pass(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "DB_PATH", tmp_path / "phoenix.sqlite")
+    store.init_db()
+    prompt = store.snapshot()["prompts"][0]
+    workflow_id = prompt["workflow"]["id"]
+    draft = prompt["draft"]
+    matched = store.save_case(workflow_id, None, "matched", "clause", None)
+    changed = store.save_case(workflow_id, None, "changed", "clause", None)
+    missed = store.save_case(workflow_id, None, "missed", "clause", None)
+    store.insert_run(
+        {
+            "prompt_id": prompt["id"],
+            "prompt_version_id": None,
+            "body": draft,
+            "case_id": matched,
+            "input_text": "clause",
+            "expectation": "",
+            "kind": "try",
+            "output_text": '{"product":"FCN"}',
+            "reasoning_text": "",
+            "parsed": {"product": "FCN"},
+            "passed": None,
+        }
+    )
+    store.insert_run(
+        {
+            "prompt_id": prompt["id"],
+            "prompt_version_id": None,
+            "body": draft + "\nextra rule",
+            "case_id": changed,
+            "input_text": "clause",
+            "expectation": "",
+            "kind": "try",
+            "output_text": '{"product":"AQ"}',
+            "reasoning_text": "",
+            "parsed": {"product": "AQ"},
+            "passed": None,
+        }
+    )
+    store.insert_run(
+        {
+            "prompt_id": prompt["id"],
+            "prompt_version_id": None,
+            "body": draft,
+            "case_id": missed,
+            "input_text": "clause",
+            "expectation": "",
+            "kind": "try",
+            "output_text": '{"product":"DQ"}',
+            "reasoning_text": "",
+            "parsed": {"product": "DQ"},
+            "passed": None,
+        }
+    )
+    store.save_case(workflow_id, matched, "matched", "clause", "FCN")
+    store.save_case(workflow_id, changed, "changed", "clause", "AQ")
+    store.save_case(workflow_id, missed, "missed", "clause", "ELN")
+
+    page = store.case_page(
+        workflow_id,
+        suite="test",
+        result="all",
+        page=1,
+        page_size=50,
+        version_id=None,
+    )
+    by_title = {row["title"]: row for row in page["rows"]}
+    assert by_title["matched"]["passed"] is True
+    assert by_title["changed"]["passed"] is None
+    assert by_title["missed"]["passed"] is None
+    assert page["counts"]["pass"] == 1
+    assert page["counts"]["unscored"] == 2
+    open_ids = {case["id"] for case in store.cases_for_scope(prompt["id"], None, "unscored")}
+    assert matched not in open_ids
+    assert changed in open_ids
+    assert missed in open_ids
 
 
 def test_create_target_keeps_url_key_and_model(tmp_path, monkeypatch):

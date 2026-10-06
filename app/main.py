@@ -2,7 +2,7 @@ import asyncio
 import re
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -259,6 +259,7 @@ def list_cases(
     page: int = 1,
     page_size: int = 50,
     version_id: int | None = None,
+    expectation: list[str] = Query(default=[]),
 ) -> dict:
     if suite not in {"test", "pending"}:
         raise HTTPException(status_code=400, detail="suite must be test or pending")
@@ -271,6 +272,7 @@ def list_cases(
         page=page,
         page_size=page_size,
         version_id=version_id,
+        expectations=expectation,
     )
 
 
@@ -344,6 +346,7 @@ class RunBody(BaseModel):
     version_id: int | None = None
     target_id: int | None = None
     scope: str
+    case_ids: list[int] = []
 
 
 @app.put("/api/versions/{version_id}/remark")
@@ -399,8 +402,8 @@ async def run_labeled(prompt_id: int, body: RunBody) -> dict:
     prompt = store.get_prompt(prompt_id)
     if not prompt:
         raise HTTPException(status_code=404, detail="Prompt not found")
-    if body.scope not in {"all", "fail", "unscored"}:
-        raise HTTPException(status_code=400, detail="scope must be all, fail, or unscored")
+    if body.scope not in {"all", "fail", "unscored", "selected"}:
+        raise HTTPException(status_code=400, detail="scope must be all, fail, unscored, or selected")
     version_id = None
     if body.source == "version":
         version = store.get_version(body.version_id or 0)
@@ -416,7 +419,10 @@ async def run_labeled(prompt_id: int, body: RunBody) -> dict:
     if not target_id:
         raise HTTPException(status_code=400, detail="先選 API Target")
     try:
-        cases = store.cases_for_scope(prompt_id, version_id, body.scope)
+        if body.scope == "selected":
+            cases = store.cases_by_ids(prompt_id, body.case_ids)
+        else:
+            cases = store.cases_for_scope(prompt_id, version_id, body.scope)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     if not cases:
@@ -438,7 +444,7 @@ async def run_labeled(prompt_id: int, body: RunBody) -> dict:
     await _attach_review(prompt_id, runs)
     briefs = [_run_brief(run) for run in runs]
     failed = sum(1 for run in briefs if run["passed"] is False)
-    label = {"all": "全部", "fail": "未通過", "unscored": "未回歸"}[body.scope]
+    label = {"all": "全部", "fail": "未通過", "unscored": "未回歸", "selected": "已選"}[body.scope]
     return {
         "runs": briefs,
         "message": f"Run {label} 完成，{len(runs)} 筆，未通過 {failed} 筆",
